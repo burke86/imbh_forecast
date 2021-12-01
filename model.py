@@ -145,20 +145,19 @@ def inv_transform_sampling(y, x, n_samples=1000, survival=False):
     # https://tmramalho.github.io/blog/2013/12/16/how-to-do-inverse-transformation-sampling-in-scipy-and-numpy/
     # https://en.wikipedia.org/wiki/Inverse_transform_sampling
     dx = np.diff(x)
+    dlogx = np.diff(np.log10(x))
     cum_values = np.zeros(x.shape)
     cum_values[1:] = np.cumsum(y*dx)/np.sum(y*dx)
     inv_cdf = interp1d(cum_values, x, fill_value='extrapolate')
     if survival:
-        # TODO: Why the factor of 2-3?
-        dlogx = np.diff(np.log10(x))
-        n_samples = int(survival*np.sum(y*dx/dlogx))
+        n_samples = int(survival)
         print(n_samples)
     r = np.random.rand(n_samples)
     return inv_cdf(r)
 
 
 def survival_sampling(y, survival):
-    # Can't randommly sample, will muck up indicies
+    # Can't randomly sample, will muck up indicies
     n_samples = len(y)
     randp = np.random.rand(n_samples)
     mask_rand = (randp < survival)
@@ -206,7 +205,7 @@ class DemographicModel:
         beta = np.random.normal(loc=1.05, scale=0.11, size=nbootstrap)
 
         # Stellar Mass Function
-        M_star_ = np.logspace(4.5, 13.5, nbins+1)*u.Msun
+        M_star_ = np.logspace(4.5, 12.5, nbins+1)*u.Msun
         dM_star = np.diff(M_star_)
         dlogM_star = np.diff(np.log10(M_star_.value))
         pars['M_star'] = M_star_[1:] + dM_star/2 # bins
@@ -274,7 +273,7 @@ class DemographicModel:
             phidM = np.exp(-pars['M_star']/M_br[j]) * (phi1[j]*(pars['M_star']/M_br[j])**alpha1[j] +
                                                         phi2[j]*(pars['M_star']/M_br[j])**alpha2[j]) * dM_star/M_br[j]
             # phi = dN / dlog M
-            sf = V.to(u.Mpc**3).value/eta # Normalization
+            sf = V.to(u.Mpc**3).value / eta * trapz((phidM/dM_star).value, pars['M_star'].value) # Normalization
             M_star_draw = inv_transform_sampling((phidM/dM_star).value, M_star_.value, survival=sf)*u.Msun
             ndraw = len(M_star_draw)
             samples['ndraws'][j] = ndraw
@@ -365,7 +364,7 @@ class DemographicModel:
         self.samples['M_i_model'] = M_i_model # Shape NxNxN
         
         # Create interpolator objects
-        fn_L_band_model = RegularGridInterpolator((x, y, z), np.log10(L_band_model), bounds_error=False, fill_value=None)
+        fn_L_band_model = RegularGridInterpolator((x, y, z), L_band_model, bounds_error=False, fill_value=None)
         fn_M_i_model = RegularGridInterpolator((x, y), M_i_model, bounds_error=False, fill_value=None)
         
         print(f'Sampling SEDs')
@@ -381,7 +380,7 @@ class DemographicModel:
             points_3 = np.array([xj, yj, zj]).T
             points_2 = np.array([xj, yj]).T
             
-            self.samples[f'L_{band}'][j,:ndraw] = (10**fn_L_band_model(points_3))*u.erg/u.s
+            self.samples[f'L_{band}'][j,:ndraw] = fn_L_band_model(points_3)*u.erg/u.s
             self.samples['M_i'][j,:ndraw] = fn_M_i_model(points_2)
     
     
@@ -500,6 +499,8 @@ class DemographicModel:
         f_popIII = np.ones_like(M_star) # light
         f_dc = f_occ_Bellovary19(M_star.value) # dN / dlog lambda_EDD heavy
         
+        print(dlogM_star)
+        
         # phi dM / dlogM
         axs[0].fill_between(M_star, np.nanpercentile(n_i_M, 16, axis=0)/dlogM_star/V,
                             np.nanpercentile(n_i_M, 84, axis=0)/dlogM_star/V, color='k', alpha=0.5)
@@ -533,7 +534,7 @@ class DemographicModel:
         axs[1].set_xlabel(r'$M_{\star}\ (M_{\odot})$', fontsize=18)
         axs[1].set_ylabel(r'$\lambda_{\rm{occ}}$', fontsize=18)
         axs[1].set_xscale('log')
-        axs[1].set_xlim([1e6, 1e12])
+        axs[1].set_xlim([1e6, 1e11])
         axs[1].set_ylim([0, 1.1])
 
         # M_BH - M_star
@@ -545,7 +546,7 @@ class DemographicModel:
         axs[2].fill_between(M_star, bin_hi, bin_lo, color='k', alpha=0.5)
         axs[2].set_xscale('log')
         axs[2].set_yscale('log')
-        axs[2].set_xlim([1e6, 1e12])
+        axs[2].set_xlim([1e6, 1e11])
         axs[2].set_ylim([1e2, 1e8])
         axs[2].set_ylabel(r'$M_{\rm{BH}}\ (M_{\odot})$', fontsize=18)
         axs[2].set_xlabel(r'$M_{\rm{\star}}\ (M_{\odot})$', fontsize=18)
