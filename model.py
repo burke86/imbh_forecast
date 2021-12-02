@@ -5,7 +5,7 @@ import numpy as np
 from astropy import units as u
 import astropy.constants as const
 import scipy.stats as st
-from scipy.interpolate import interp1d, RegularGridInterpolator
+from scipy.interpolate import interp1d, RegularGridInterpolator, LinearNDInterpolator
 from scipy.integrate import trapz, cumtrapz
 
 import matplotlib.pyplot as plt
@@ -82,6 +82,31 @@ def get_AGN_flux(model_sed, M_BH=1e6, lambda_Edd=0.1, z=0.01, band='SDSS_g'):
     
     return M_band, m_band, L_AGN_band.to(u.erg/u.s).value, f_band.to(u.erg/u.s/u.cm**2).value
 
+def lambda_obs(L_bol):
+    
+    L_bol = (L_bol*u.erg/u.s).to(u.Lsun)
+    
+    a = np.random.normal(10.96, 0.06)
+    b = np.random.normal(11.93, 0.01)
+    c = np.random.normal(17.79, 0.10)
+        
+    # https://ui.adsabs.harvard.edu/abs/2020A%26A...636A..73D/abstract
+    sig = np.random.normal(0, 0.27)
+    sgn = np.sign(sig)
+    k_X = a*(1 + (np.log10(L_bol/(1*u.Lsun))/b)**c) + sgn*np.log10(np.abs(sig))
+    L_X = L_bol/k_X
+    L_X = L_X.to(u.erg/u.s)
+        
+    A = 0.5 # Must be 0.5 so the range is betwen 0 and 1
+    l_0 = 43.89
+    sigma_x = 0.46
+    
+    # https://ui.adsabs.harvard.edu/abs/2014MNRAS.437.3550M/abstract
+    l_x = np.log10(L_X.value)
+    lambda_obs = A + 1/np.pi*np.arctan((l_0 - l_x)/sigma_x)
+        
+    return lambda_obs
+
 
 def simulate_drw(t_rest, tau=300., z=2.0, xmean=0, SFinf=0.3):
 
@@ -156,12 +181,12 @@ def inv_transform_sampling(y, x, n_samples=1000, survival=False):
     return inv_cdf(r)
 
 
-def survival_sampling(y, survival):
+def survival_sampling(y, survival, fill_value=-99):
     # Can't randomly sample, will muck up indicies
     n_samples = len(y)
     randp = np.random.rand(n_samples)
     mask_rand = (randp < survival)
-    y_survive = np.full(y.shape, np.nan)
+    y_survive = np.full(y.shape, fill_value)
     y_survive[mask_rand] = y[mask_rand]
     return y_survive
 
@@ -245,7 +270,7 @@ class DemographicModel:
         samples['n_i_M_popIII'] = np.full([nbootstrap, nbins], np.nan, dtype=np.int)
 
         # 5. Eddington ratio Function
-        lambda_ = np.logspace(-3.5, 1, nbins+1) # Needs to match Weigel et al. or \xi will need to be re-normalized
+        lambda_ = np.logspace(-3.2, 1, nbins+1) # Needs to match Weigel et al. or \xi will need to be re-normalized
         dlambda = np.diff(lambda_)
         dloglambda = np.diff(np.log10(lambda_))
         pars['lambda_Edd'] = lambda_[1:] + dlambda/2 # bins
@@ -265,7 +290,7 @@ class DemographicModel:
         samples['n_i_L_popIII'] = np.full([nbootstrap, nbins], np.nan, dtype=np.int)
         samples['n_i_L_dc'] = np.full([nbootstrap, nbins], np.nan, dtype=np.int)
 
-        samples['ndraws'] = np.empty(nbootstrap) ## TODO: Can we just combine these?
+        samples['ndraws'] = np.empty(nbootstrap)
         
         for j in tqdm(range(nbootstrap)):
 
@@ -306,6 +331,10 @@ class DemographicModel:
             # 6. AGN Luminosity Function
             samples['L_draw_popIII'][j,:ndraw] = samples['lambda_draw'][j,:ndraw] * 1.26e38 * (samples['M_BH_draw_popIII'][j,:ndraw]/(1*u.Msun)) *u.erg/u.s
             samples['L_draw_dc'][j,:ndraw] = samples['lambda_draw'][j,:ndraw] * 1.26e38 * (samples['M_BH_draw_dc'][j,:ndraw]/(1*u.Msun)) *u.erg/u.s
+            
+            # 7. Obscuration Fraction survival sampling TODO
+            
+            
             samples['n_i_L_popIII'][j,:], _ = np.histogram(samples['L_draw_popIII'][j,:ndraw], bins=L_)
             samples['n_i_L_dc'][j,:], _ = np.histogram(samples['L_draw_dc'][j,:ndraw], bins=L_)            
 
@@ -352,10 +381,10 @@ class DemographicModel:
         # Get AGN luminosity in band and M_i(z=2)
         vget_AGN_flux = np.vectorize(get_AGN_flux)
         
-        X, Y, Z = np.meshgrid(x, y, z)
+        X, Y, Z = np.meshgrid(x, y, z, indexing='ij', sparse=True)
         _, _, L_band_model, _ = vget_AGN_flux(model_sed, M_BH=X, lambda_Edd=Y, z=Z, band=band)
         
-        X, Y = np.meshgrid(x, y)
+        X, Y = np.meshgrid(x, y, indexing='ij', sparse=True)
         M_i_model, _, _, _ = vget_AGN_flux(model_sed, M_BH=X, lambda_Edd=Y, z=2.0, band='SDSS_i')
         
         self.samples[f'L_{band}'] = np.full([nbootstrap, ndraw], np.nan)*u.erg/u.s
@@ -364,8 +393,10 @@ class DemographicModel:
         self.samples['M_i_model'] = M_i_model # Shape NxNxN
         
         # Create interpolator objects
-        fn_L_band_model = RegularGridInterpolator((x, y, z), L_band_model, bounds_error=False, fill_value=None)
-        fn_M_i_model = RegularGridInterpolator((x, y), M_i_model, bounds_error=False, fill_value=None)
+        fn_L_band_model = RegularGridInterpolator((np.log10(x), np.log10(y), z), np.log10(L_band_model),
+                                                  bounds_error=False, fill_value=None)
+        fn_M_i_model = RegularGridInterpolator((np.log10(x), np.log10(y)), M_i_model,
+                                               bounds_error=False, fill_value=None)
         
         print(f'Sampling SEDs')
         
@@ -374,13 +405,12 @@ class DemographicModel:
             
             ndraw = int(s['ndraws'][j])
             
-            xj = s['M_BH_draw'].value[j,:ndraw]
-            yj = s['lambda_draw'][j,:ndraw]
+            xj = np.log10(s['M_BH_draw'].value[j,:ndraw])
+            yj = np.log10(s['lambda_draw'][j,:ndraw])
             zj = s['z_draw'][j,:ndraw]
             points_3 = np.array([xj, yj, zj]).T
             points_2 = np.array([xj, yj]).T
-            
-            self.samples[f'L_{band}'][j,:ndraw] = fn_L_band_model(points_3)*u.erg/u.s
+            self.samples[f'L_{band}'][j,:ndraw] = 10**(fn_L_band_model(points_3))*u.erg/u.s
             self.samples['M_i'][j,:ndraw] = fn_M_i_model(points_2)
     
     
@@ -498,9 +528,7 @@ class DemographicModel:
         ## TODO: Generalize input
         f_popIII = np.ones_like(M_star) # light
         f_dc = f_occ_Bellovary19(M_star.value) # dN / dlog lambda_EDD heavy
-        
-        print(dlogM_star)
-        
+                
         # phi dM / dlogM
         axs[0].fill_between(M_star, np.nanpercentile(n_i_M, 16, axis=0)/dlogM_star/V,
                             np.nanpercentile(n_i_M, 84, axis=0)/dlogM_star/V, color='k', alpha=0.5)
