@@ -24,12 +24,15 @@ lib = pyphot.get_library()
 xspec.Xset.allowPrompting = False
 
 
-# Heavy seed scenario (TODO: What about wandering BHs?)
 def f_occ_Bellovary19(M_star):
-    f = [0.03, 0.06, 0.16, 0.2, 0.78, 1.0, 1.0, 1.0, 1.0]
-    x = [4.5, 5.5, 6.5, 7.5, 8.5, 9.5, 10.5, 11.5, 12.5]
+    """
+    Heavy seed scenario
+    """
+    f = np.array([0.03, 0.06, 0.16, 0.2, 0.78, 1.0, 1.0, 1.0, 1.0])
+    x = np.array([4.5, 5.5, 6.5, 7.5, 8.5, 9.5, 10.5, 11.5, 12.5])
     f_interp = np.interp(np.log10(M_star), x, f)
-    return np.clip(np.random.normal(f_interp, 0.3*f_interp), 0, 1)
+    df_interp = np.interp(np.log10(M_star), x, 0.3*f)
+    return np.clip(np.random.normal(f_interp, df_interp), 0, 1)
 
 def _ERDF(lambda_Edd):
     xi = 10**-1.65
@@ -40,7 +43,7 @@ def _ERDF(lambda_Edd):
     # What sets the break? Transfer from radiatively efficient to inefficient accretion?
     return xi * ((lambda_Edd/lambda_br)**delta1 + (lambda_Edd/lambda_br)**delta2)**-1 # dN / dlog lambda
 
-ERDF = np.vectorize(_ERDF)
+ERDF = np.vectorize(_ERDF) # I think we need to get rid of vectorize here!
 
 
 def get_AGN_flux(model_sed, M_BH=1e6, lambda_Edd=0.1, z=0.01, band='SDSS_g'):
@@ -89,23 +92,24 @@ def lambda_obs(L_bol):
     a = np.random.normal(10.96, 0.06)
     b = np.random.normal(11.93, 0.01)
     c = np.random.normal(17.79, 0.10)
-        
+    
     # https://ui.adsabs.harvard.edu/abs/2020A%26A...636A..73D/abstract
     sig = np.random.normal(0, 0.27)
     sgn = np.sign(sig)
     k_X = a*(1 + (np.log10(L_bol/(1*u.Lsun))/b)**c) + sgn*np.log10(np.abs(sig))
     L_X = L_bol/k_X
     L_X = L_X.to(u.erg/u.s)
-        
+    
     A = 0.5 # Must be 0.5 so the range is betwen 0 and 1
     l_0 = 43.89
     sigma_x = 0.46
     
     # https://ui.adsabs.harvard.edu/abs/2014MNRAS.437.3550M/abstract
+    # Add 0.2 dex scatter 
     l_x = np.log10(L_X.value)
     lambda_obs = A + 1/np.pi*np.arctan((l_0 - l_x)/sigma_x)
-        
-    return lambda_obs
+    
+    return np.clip(np.random.normal(lambda_obs, 0.1), 0, 1)
 
 
 def simulate_drw(t_rest, tau=300., z=2.0, xmean=0, SFinf=0.3):
@@ -181,7 +185,7 @@ def inv_transform_sampling(y, x, n_samples=1000, survival=False):
     return inv_cdf(r)
 
 
-def survival_sampling(y, survival, fill_value=-99):
+def survival_sampling(y, survival, fill_value=np.nan):
     # Can't randomly sample, will muck up indicies
     n_samples = len(y)
     randp = np.random.rand(n_samples)
@@ -201,7 +205,7 @@ class DemographicModel:
         
 
     def sample(self, nbins=10, nbootstrap=50, eta=1e4, zmax=0.1, ndraw_dim=1e7,
-               occ_dict={'dc':(lambda x: np.ones_like(x))}):
+               seed_dict={'dc':(lambda x: np.ones_like(x)), 'popIII':f_occ_Bellovary19}):
 
         """
         See https://iopscience.iop.org/article/10.3847/1538-4357/aa803b/pdf
@@ -217,6 +221,7 @@ class DemographicModel:
         
         ndraw_dim = int(ndraw_dim)
         pars['ndraw_dim'] = ndraw_dim
+        pars['seed_dict'] = seed_dict
 
         # Use galaxy mass function from https://ui.adsabs.harvard.edu/abs/2012MNRAS.421..621B/abstract
         M_br = np.random.normal(loc=10**10.66, scale=10**0.05, size=nbootstrap)*u.Msun
@@ -234,7 +239,7 @@ class DemographicModel:
         dM_star = np.diff(M_star_)
         dlogM_star = np.diff(np.log10(M_star_.value))
         pars['M_star'] = M_star_[1:] + dM_star/2 # bins
-        pars['M_star_'] = M_star_ ## ??
+        pars['M_star_'] = M_star_
 
         # 1. Assign number of draws
         d_c_min = 0.5*u.Mpc
@@ -264,10 +269,10 @@ class DemographicModel:
         samples['z_draw'] = np.full([nbootstrap, ndraw_dim], np.nan)
 
         samples['M_BH_draw'] = np.full([nbootstrap, ndraw_dim], np.nan)*u.Msun
-        samples['M_BH_draw_dc'] = np.full([nbootstrap, ndraw_dim], np.nan)*u.Msun
-        samples['M_BH_draw_popIII'] = np.full([nbootstrap, ndraw_dim], np.nan)*u.Msun
-        samples['n_i_M_dc'] = np.full([nbootstrap, nbins], np.nan, dtype=np.int)
-        samples['n_i_M_popIII'] = np.full([nbootstrap, nbins], np.nan, dtype=np.int)
+        # Occupation probabililty survival sampling
+        for k, seed in enumerate(seed_dict.keys()):
+            samples[f'M_BH_draw_{seed}'] = np.full([nbootstrap, ndraw_dim], np.nan)*u.Msun
+            samples[f'n_i_M_{seed}'] = np.full([nbootstrap, nbins], np.nan, dtype=np.int)
 
         # 5. Eddington ratio Function
         lambda_ = np.logspace(-3.2, 1, nbins+1) # Needs to match Weigel et al. or \xi will need to be re-normalized
@@ -284,11 +289,10 @@ class DemographicModel:
         dlogL = np.diff(np.log10(L_.value))
         pars['L'] = L_[1:] + dL/2 # bins
 
-        samples['L_draw_popIII'] = np.full([nbootstrap, ndraw_dim], np.nan)*u.erg/u.s
-        samples['L_draw_dc'] = np.full([nbootstrap, ndraw_dim], np.nan)*u.erg/u.s
-
-        samples['n_i_L_popIII'] = np.full([nbootstrap, nbins], np.nan, dtype=np.int)
-        samples['n_i_L_dc'] = np.full([nbootstrap, nbins], np.nan, dtype=np.int)
+        # Occupation probabililty survival sampling
+        for k, seed in enumerate(seed_dict.keys()):
+            samples[f'L_draw_{seed}'] = np.full([nbootstrap, ndraw_dim], np.nan)*u.erg/u.s
+            samples[f'n_i_L_{seed}'] = np.full([nbootstrap, nbins], np.nan, dtype=np.int)
 
         samples['ndraws'] = np.empty(nbootstrap)
         
@@ -303,40 +307,33 @@ class DemographicModel:
             ndraw = len(M_star_draw)
             samples['ndraws'][j] = ndraw
             samples['M_star_draw'][j,:ndraw] = M_star_draw
-            samples['n_i_M'][j,:], _ = np.histogram(samples['M_star_draw'][j,:ndraw], bins=M_star_)
+            samples['n_i_M'][j,:], _ = np.histogram(M_star_draw, bins=M_star_)
 
             # Assign redshifts
             samples['z_draw'][j,:ndraw] = np.random.choice(z_samples, size=ndraw)
             
             # 4. BH Mass Function
-            M_BH_draw = 10**(alpha[j] + beta[j]*np.log10(samples['M_star_draw'][j,:ndraw]/(1e11*u.Msun)) +
+            M_BH_draw = 10**(alpha[j] + beta[j]*np.log10(M_star_draw/(1e11*u.Msun)) +
                              np.random.normal(0.0, 0.55, size=ndraw))*u.Msun
             samples['M_BH_draw'][j,:ndraw] = M_BH_draw
-
-            # Occupation probabililty survival sampling
-            p = f_occ_Bellovary19(M_star_draw.value)
-            samples['M_BH_draw_dc'][j,:ndraw] = survival_sampling(M_BH_draw.value, survival=p)*u.Msun
-            samples['n_i_M_dc'][j,:], _ = np.histogram(samples['M_BH_draw_dc'][j,:ndraw], bins=M_BH_)
-
-            # Occupation probabililty
-            p = np.ones_like(M_star_draw.value)
-            samples['M_BH_draw_popIII'][j,:ndraw] = survival_sampling(M_BH_draw.value, survival=p)*u.Msun
-            samples['n_i_M_popIII'][j,:], _ = np.histogram(samples['M_BH_draw_popIII'][j,:ndraw], bins=M_BH_)
-
+            
             # 5. Eddington ratio Function
             xi = ERDF(pars['lambda_Edd'])/dlambda # dN / dlog lambda
-            samples['lambda_draw'][j,:ndraw] = inv_transform_sampling(xi/dlambda, lambda_, ndraw)
-            samples['n_i_Edd'][j,:], _ = np.histogram(samples['lambda_draw'][j,:ndraw], bins=lambda_)
+            lambda_draw = inv_transform_sampling(xi/dlambda, lambda_, ndraw)
+            samples['lambda_draw'][j,:ndraw] = lambda_draw
+            samples['n_i_Edd'][j,:], _ = np.histogram(lambda_draw, bins=lambda_)
 
-            # 6. AGN Luminosity Function
-            samples['L_draw_popIII'][j,:ndraw] = samples['lambda_draw'][j,:ndraw] * 1.26e38 * (samples['M_BH_draw_popIII'][j,:ndraw]/(1*u.Msun)) *u.erg/u.s
-            samples['L_draw_dc'][j,:ndraw] = samples['lambda_draw'][j,:ndraw] * 1.26e38 * (samples['M_BH_draw_dc'][j,:ndraw]/(1*u.Msun)) *u.erg/u.s
-            
-            # 7. Obscuration Fraction survival sampling TODO
-            
-            
-            samples['n_i_L_popIII'][j,:], _ = np.histogram(samples['L_draw_popIII'][j,:ndraw], bins=L_)
-            samples['n_i_L_dc'][j,:], _ = np.histogram(samples['L_draw_dc'][j,:ndraw], bins=L_)            
+            # Occupation probabililty survival sampling
+            for k, seed in enumerate(seed_dict.keys()):
+                p = seed_dict[f'{seed}'](M_star_draw.value)
+                M_BH_draw_seed = survival_sampling(M_BH_draw.value, survival=p, fill_value=-99)*u.Msun
+                samples[f'M_BH_draw_{seed}'][j,:ndraw] = M_BH_draw_seed
+                samples[f'n_i_M_{seed}'][j,:], _ = np.histogram(M_BH_draw_seed, bins=M_BH_)
+
+                # 6. AGN Luminosity Function
+                L_draw_seed = lambda_draw * 1.26e38 * M_BH_draw_seed.to(u.Msun).value * u.erg/u.s
+                samples[f'L_draw_{seed}'][j,:ndraw] = L_draw_seed
+                samples[f'n_i_L_{seed}'][j,:], _ = np.histogram(samples[f'L_draw_{seed}'][j,:ndraw], bins=L_)
 
         # Correct for numerical factor and save the results
         for key in samples.keys():
@@ -387,8 +384,6 @@ class DemographicModel:
         X, Y = np.meshgrid(x, y, indexing='ij', sparse=True)
         M_i_model, _, _, _ = vget_AGN_flux(model_sed, M_BH=X, lambda_Edd=Y, z=2.0, band='SDSS_i')
         
-        self.samples[f'L_{band}'] = np.full([nbootstrap, ndraw], np.nan)*u.erg/u.s
-        self.samples['M_i'] = np.full([nbootstrap, ndraw], np.nan)
         self.samples[f'L_{band}_model'] = L_band_model*u.erg/u.s # Shape NxNxN
         self.samples['M_i_model'] = M_i_model # Shape NxNxN
         
@@ -397,21 +392,27 @@ class DemographicModel:
                                                   bounds_error=False, fill_value=None)
         fn_M_i_model = RegularGridInterpolator((np.log10(x), np.log10(y)), M_i_model,
                                                bounds_error=False, fill_value=None)
-        
-        print(f'Sampling SEDs')
-        
-        # Sample the grid at each source
-        for j in tqdm(range(nbootstrap)):
+                
+        for k, seed in enumerate(pars['seed_dict']):
             
-            ndraw = int(s['ndraws'][j])
+            self.samples[f'L_{band}_{seed}'] = np.full([nbootstrap, ndraw], np.nan)*u.erg/u.s
+            self.samples[f'M_i_{seed}'] = np.full([nbootstrap, ndraw], np.nan)
             
-            xj = np.log10(s['M_BH_draw'].value[j,:ndraw])
-            yj = np.log10(s['lambda_draw'][j,:ndraw])
-            zj = s['z_draw'][j,:ndraw]
-            points_3 = np.array([xj, yj, zj]).T
-            points_2 = np.array([xj, yj]).T
-            self.samples[f'L_{band}'][j,:ndraw] = 10**(fn_L_band_model(points_3))*u.erg/u.s
-            self.samples['M_i'][j,:ndraw] = fn_M_i_model(points_2)
+            print(f'Sampling SEDs with seeding mechanism {seed}')
+        
+            # Sample the grid at each source
+            for j in tqdm(range(nbootstrap)):
+
+                ndraw = int(s['ndraws'][j])
+
+                xj = np.log10(s[f'M_BH_draw_{seed}'].value[j,:ndraw])
+                yj = np.log10(s['lambda_draw'][j,:ndraw])
+                zj = s['z_draw'][j,:ndraw]
+                points_3 = np.array([xj, yj, zj]).T
+                points_2 = np.array([xj, yj]).T
+                print(ndraw, len(xj), len(fn_L_band_model(points_3)))
+                self.samples[f'L_{band}_{seed}'][j,:ndraw] = (10**fn_L_band_model(points_3))*u.erg/u.s
+                self.samples[f'M_i_{seed}'][j,:ndraw] = fn_M_i_model(points_2)
     
     
     def sample_light_curves(self, t_obs, dt_min=10, band='SDSS_g', f_host=0.5,  g_minus_i=0.8, mag_lim=np.inf):
@@ -421,60 +422,71 @@ class DemographicModel:
         
         ndraw = pars['ndraw_dim']
         nbootstrap = pars['nbootstrap']
-            
-        s[f'lc_{band}'] = np.full([nbootstrap, ndraw, len(t_obs)], np.nan)
-        s[f'm_{band}'] = np.full([nbootstrap, ndraw], np.nan)
+        
         s['lc_t_obs'] = t_obs
-        s[f'SFinf_{band}'] = np.full([nbootstrap, ndraw], np.nan)
-        s[f'tau_RF_{band}'] = np.full([nbootstrap, ndraw], np.nan)
-        s[f'L_host_{band}'] = np.full([nbootstrap, ndraw], np.nan)*u.erg/u.s
+        
+        for k, seed in enumerate(pars['seed_dict']):
+            
+            print(f'Sampling light curves with seeding mechanism {seed}')
+            
+            s[f'lc_{band}_{seed}'] = np.full([nbootstrap, ndraw, len(t_obs)], np.nan)
+            s[f'm_{band}_{seed}'] = np.full([nbootstrap, ndraw], np.nan)
+            s[f'SFinf_{band}_{seed}'] = np.full([nbootstrap, ndraw], np.nan)
+            s[f'tau_RF_{band}_{seed}'] = np.full([nbootstrap, ndraw], np.nan)
+            s[f'L_host_{band}_{seed}'] = np.full([nbootstrap, ndraw], np.nan)*u.erg/u.s
+
+            for j in tqdm(range(nbootstrap)):
+
+                ndraw = int(s['ndraws'][j])
+
+                z = s['z_draw'][j,:ndraw]
+                M_BH = s[f'M_BH_draw_{seed}'][j,:ndraw].value
+                # Model data
+                L_band_AGN = s[f'L_{band}_{seed}'][j,:ndraw]
+                L_bol_AGN = s[f'L_draw_{seed}'][j,:ndraw]
+                M_i_AGN = s[f'M_i_{seed}'][j,:ndraw]
                 
-        for j in tqdm(range(nbootstrap)):
-            
-            ndraw = int(s['ndraws'][j])
-            
-            z = s['z_draw'][j,:ndraw]
-            M_BH = s['M_BH_draw'][j,:ndraw].value
-            L_band_AGN = s[f'L_{band}'][j,:ndraw]
-            M_i_AGN = s[f'M_i'][j,:ndraw]
-            
-            lambda_RF = lib[band].lpivot/(1 + z)
-            
-            # Use the host M/L ratio to get host galaxy luminosity
-            # TODO: Assumes g-band (need dict of coefficients)
-            M_stellar = 1e11*u.Msun * 10**((np.log10(M_BH + np.random.normal(0.0, 0.5, size=ndraw)) - 7.45)/1.05)
-            L_band_host = f_host * M_stellar/(1*u.Msun) / 10**(2.053*g_minus_i - 1.030 + np.random.normal(0.0, 0.3, size=ndraw))*u.Lsun
-            L_band_host = L_band_host.to(u.erg/u.s)
-            s[f'L_host_{band}'][j,:ndraw] = L_band_host
-            
-            d_L = cosmo.comoving_distance(z).to(u.cm)
-            f_band = (L_band_host + L_band_AGN) / (4*np.pi*d_L**2)
-            f_lambda_band = (f_band / lib[band].lpivot).to(u.erg/u.s/u.cm**2/u.AA)
+                # 7. Optically obscured fraction survival sampling
+                #p = 1 - lambda_obs(L_bol_AGN.value) # Type I probability
+                #L_band_AGN = survival_sampling(L_band_AGN.value, survival=p, fill_value=0)*u.erg/u.s
 
-            # Get apparent magnitude of AGN + host galaxy
-            m_band = -2.5*np.log10(f_lambda_band.value) - lib[band].AB_zero_mag
-            s[f'm_{band}'][j,:ndraw] = m_band
-                        
-            ###
-            # Draw SF_\infty and tau (rest-frame)
-            SFinf = draw_SFinf(lambda_RF.to(u.AA).value, M_i_AGN, M_BH, size=ndraw)
-            tau = draw_tau(lambda_RF.to(u.AA).value, M_i_AGN, M_BH, size=ndraw)
+                lambda_RF = lib[band].lpivot/(1 + z)
 
-            # Host-galaxy dilution
-            dL = L_band_AGN*np.log(10)/2.5*SFinf
-            SFinf = 2.5/np.log(10)*dL/(L_band_AGN + L_band_host)
-            
-            t_obs_dense = np.arange(np.min(t_obs), np.max(t_obs), dt_min)
-            t_obs_dense_shaped = np.array([t_obs_dense]*ndraw).T
-            t_rest_dense_shaped = np.array([np.arange(np.min(t_obs), np.max(t_obs), dt_min)]*ndraw).T / (1 + z)
-            
-            s[f'SFinf_{band}'][j,:ndraw] = SFinf
-            s[f'tau_RF_{band}'][j,:ndraw] = tau
-            
-            # Simulate light curves (clip tau to avoid numerical issues if tau << dt_min)
-            lcs = simulate_drw(t_rest_dense_shaped, np.clip(tau, 2*dt_min, None), z, m_band, SFinf).T
-            f = interp1d(t_obs_dense, lcs, fill_value='extrapolate')
-            s[f'lc_{band}'][j,:ndraw,:] = f(t_obs)
+                # Use the host M/L ratio to get host galaxy luminosity
+                # TODO: Assumes g-band (need dict of coefficients)
+                M_stellar = 1e11*u.Msun * 10**((np.log10(M_BH + np.random.normal(0.0, 0.5, size=ndraw)) - 7.45)/1.05)
+                L_band_host = f_host * M_stellar/(1*u.Msun) / 10**(2.053*g_minus_i - 1.030 + np.random.normal(0.0, 0.3, size=ndraw))*u.Lsun
+                L_band_host = L_band_host.to(u.erg/u.s)
+                s[f'L_host_{band}_{seed}'][j,:ndraw] = L_band_host
+
+                d_L = cosmo.comoving_distance(z).to(u.cm)
+                f_band = (L_band_host + L_band_AGN) / (4*np.pi*d_L**2)
+                f_lambda_band = (f_band / lib[band].lpivot).to(u.erg/u.s/u.cm**2/u.AA)
+
+                # Get apparent magnitude of AGN + host galaxy
+                m_band = -2.5*np.log10(f_lambda_band.value) - lib[band].AB_zero_mag
+                s[f'm_{band}_{seed}'][j,:ndraw] = m_band
+
+                ###
+                # Draw SF_\infty and tau (rest-frame)
+                SFinf = draw_SFinf(lambda_RF.to(u.AA).value, M_i_AGN, M_BH, size=ndraw)
+                tau = draw_tau(lambda_RF.to(u.AA).value, M_i_AGN, M_BH, size=ndraw)
+
+                # Host-galaxy dilution
+                dL = L_band_AGN*np.log(10)/2.5*SFinf
+                SFinf = 2.5/np.log(10)*dL/(L_band_AGN + L_band_host)
+
+                t_obs_dense = np.arange(np.min(t_obs), np.max(t_obs), dt_min)
+                t_obs_dense_shaped = np.array([t_obs_dense]*ndraw).T
+                t_rest_dense_shaped = np.array([np.arange(np.min(t_obs), np.max(t_obs), dt_min)]*ndraw).T / (1 + z)
+
+                s[f'SFinf_{band}_{seed}'][j,:ndraw] = SFinf
+                s[f'tau_RF_{band}_{seed}'][j,:ndraw] = tau
+
+                # Simulate light curves (clip tau to avoid numerical issues if tau << dt_min)
+                lcs = simulate_drw(t_rest_dense_shaped, np.clip(tau, 2*dt_min, None), z, m_band, SFinf).T
+                f = interp1d(t_obs_dense, lcs, fill_value='extrapolate')
+                s[f'lc_{band}_{seed}'][j,:ndraw,:] = f(t_obs)
             
 
     def save(self, filepath='model.pickle'):
@@ -493,7 +505,7 @@ class DemographicModel:
             return DemographicModel()
             
         
-    def plot(self, figsize=(3*6*0.9, 2*5*0.9)):
+    def plot(self, figsize=(3*6*0.9, 2*5*0.9), seed_colors=['b','m']):
     
         import matplotlib.ticker as ticker
 
@@ -505,11 +517,7 @@ class DemographicModel:
         
         V = pars['V']
         n_i_M = samples['n_i_M']
-        n_i_M_dc = samples['n_i_M_dc']
-        n_i_M_popIII = samples['n_i_M_popIII']
         n_i_Edd = samples['n_i_Edd']
-        n_i_L_popIII = samples['n_i_L_popIII']
-        n_i_L_dc = samples['n_i_L_dc']
         
         M_star_draw = samples['M_star_draw']
         M_BH_draw = samples['M_BH_draw']
@@ -550,14 +558,18 @@ class DemographicModel:
         axs[0].scatter(10**x, y*1e-3, c='r', marker='x')
 
         # 3. BH Occupation fraction
-        axs[1].plot(M_star, f_popIII, lw=3, color='b', alpha=0.5)
-        axs[1].scatter(M_star, f_popIII, lw=3, color='b')
+        #axs[1].plot(M_star, f_popIII, lw=3, color='b', alpha=0.5)
+        #axs[1].scatter(M_star, f_popIII, lw=3, color='b')
         nbootstrap = pars['nbootstrap']
-        f_dc = np.zeros([nbootstrap, len(M_star)])
-        for j in range(nbootstrap):
-            f_dc[j,:] = f_occ_Bellovary19(M_star.value)
-        axs[1].fill_between(M_star, np.percentile(f_dc, 16, axis=0), np.percentile(f_dc, 84, axis=0), color='m', alpha=0.5)
-        axs[1].scatter(M_star, np.nanmean(f_dc, axis=0), lw=3, color='m')
+
+        for k, seed in enumerate(pars['seed_dict']):
+            
+            f = np.zeros([nbootstrap, len(M_star)])
+            for j in range(nbootstrap):
+                f[j,:] = pars['seed_dict'][f'{seed}'](M_star.value)
+                
+            axs[1].fill_between(M_star, np.percentile(f, 16, axis=0), np.percentile(f, 84, axis=0), color=seed_colors[k], alpha=0.5)
+            axs[1].scatter(M_star, np.nanmean(f, axis=0), lw=3, color=seed_colors[k])
         
         axs[1].set_xlabel(r'$M_{\star}\ (M_{\odot})$', fontsize=18)
         axs[1].set_ylabel(r'$\lambda_{\rm{occ}}$', fontsize=18)
@@ -580,13 +592,10 @@ class DemographicModel:
         axs[2].set_xlabel(r'$M_{\rm{\star}}\ (M_{\odot})$', fontsize=18)
 
         # 
-        axs[3].fill_between(M_BH, np.nanpercentile(n_i_M_popIII, 16, axis=0)/dlogM_BH/V,
-                            np.nanpercentile(n_i_M_popIII, 84, axis=0)/dlogM_BH/V, color='b', alpha=0.5)
-        axs[3].scatter(M_BH, np.nanmean(n_i_M_popIII, axis=0)/dlogM_BH/V, lw=3, color='b')
-
-        axs[3].fill_between(M_BH, np.nanpercentile(n_i_M_dc, 16, axis=0)/dlogM_BH/V,
-                            np.nanpercentile(n_i_M_dc, 84, axis=0)/dlogM_BH/V, color='m', alpha=0.5)
-        axs[3].scatter(M_BH, np.nanmean(n_i_M_dc, axis=0)/dlogM_BH/V, lw=3, color='m')
+        for k, seed in enumerate(pars['seed_dict']):
+            axs[3].fill_between(M_BH, np.nanpercentile(samples[f'n_i_M_{seed}'], 16, axis=0)/dlogM_BH/V,
+                                np.nanpercentile(samples[f'n_i_M_{seed}'], 84, axis=0)/dlogM_BH/V, color=seed_colors[k], alpha=0.5)
+            axs[3].scatter(M_BH, np.nanmean(samples[f'n_i_M_{seed}'], axis=0)/dlogM_BH/V, lw=3, color=seed_colors[k])
 
         axs[3].set_xlabel(r'$M_{\rm{BH}}\ (M_{\odot})$', fontsize=18)
         axs[3].set_ylabel(r'$\phi(M_{\rm{BH}})$ (dex$^{-1}$ Mpc$^{-3}$)', fontsize=18)
@@ -608,12 +617,10 @@ class DemographicModel:
         #axs[4].set_ylim([1e-8, 1e1])
 
         # 6. AGN Luminosity Function
-        axs[5].scatter(L, np.nanmean(n_i_L_popIII, axis=0)/dlogL/V, lw=3, color='b')
-        axs[5].fill_between(L, np.nanpercentile(n_i_L_popIII, 16, axis=0)/dlogL/V,
-                            np.nanpercentile(n_i_L_popIII, 84, axis=0)/dlogL/V, color='b', alpha=0.5)
-        axs[5].scatter(L, np.nanmean(n_i_L_dc, axis=0)/dlogL/V, lw=3, color='m')
-        axs[5].fill_between(L, np.nanpercentile(n_i_L_dc, 16, axis=0)/dlogL/V,
-                            np.nanpercentile(n_i_L_dc, 84, axis=0)/dlogL/V, color='m', alpha=0.5)
+        for k, seed in enumerate(pars['seed_dict']):
+            axs[5].scatter(L, np.nanmean(samples[f'n_i_L_{seed}'], axis=0)/dlogL/V, lw=3, color=seed_colors[k])
+            axs[5].fill_between(L, np.nanpercentile(samples[f'n_i_L_{seed}'], 16, axis=0)/dlogL/V,
+                            np.nanpercentile(samples[f'n_i_L_{seed}'], 84, axis=0)/dlogL/V, color=seed_colors[k], alpha=0.5)
         
         # Real data
         # https://ui.adsabs.harvard.edu/abs/2009A%26A...507..781S/exportcitation
@@ -647,8 +654,8 @@ class DemographicModel:
             #ax.xaxis.set_ticks_position('both')
             #ax.yaxis.set_ticks_position('both')
 
-            #ax.xaxis.set_major_locator(ticker.LogLocator(1))
-            #ax.yaxis.set_major_locator(ticker.LogLocator(1))
+            ax.xaxis.set_major_locator(ticker.LogLocator(base=10))
+            #ax.yaxis.set_major_locator(ticker.LogLocator(base=10))
 
 
         fig.tight_layout()
