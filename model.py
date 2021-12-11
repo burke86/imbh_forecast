@@ -32,7 +32,8 @@ def f_occ_Bellovary19(M_star):
     x = np.array([4.5, 5.5, 6.5, 7.5, 8.5, 9.5, 10.5, 11.5, 12.5])
     f_interp = np.interp(np.log10(M_star), x, f)
     df_interp = np.interp(np.log10(M_star), x, 0.3*f)
-    return np.clip(np.random.normal(f_interp, df_interp), 0, 1)
+    return np.clip(f_interp, 0, 1)
+    #return np.clip(np.random.normal(f_interp, df_interp), 0, 1)
 
 def _ERDF(lambda_Edd):
     xi = 1
@@ -258,14 +259,13 @@ class DemographicModel:
         # 1. Assign number of draws
         d_c_min = 0.5*u.Mpc
         samples['zmax'] = zmax
-        samples['zmin'] = 1e-8 #z_at_value(cosmo.comoving_distance, d_c_min, zmin=-0.001, zmax=zmax+0.001)
+        samples['zmin'] = z_at_value(cosmo.comoving_distance, d_c_min, zmin=-1e-4, zmax=zmax+1e-4) # 1e-8
         V = cosmo.comoving_volume(zmax)*omega/(4*np.pi)
         pars['V'] = V
-        d_c_min = cosmo.comoving_distance(samples['zmin'])
+        #d_c_min = cosmo.comoving_distance(samples['zmin'])
         d_c_samples = np.linspace(d_c_min.to(u.Mpc), cosmo.comoving_distance(zmax).to(u.Mpc), 100, dtype=dtype)
-        z_samples = np.array([z_at_value(cosmo.comoving_distance, d_c, zmin=-0.001, zmax=zmax+0.001)
+        z_samples = np.array([z_at_value(cosmo.comoving_distance, d_c, zmin=-1e-4, zmax=zmax+1e-4)
                               for d_c in d_c_samples])
-        print(z_samples)
 
         # 2. Draw from the stellar mass function
         samples['M_star_draw'] = np.full([nbootstrap, ndraw_dim], np.nan, dtype=dtype)*u.Msun
@@ -394,7 +394,6 @@ class DemographicModel:
         x = np.logspace(pars['log_M_BH_min'], pars['log_M_BH_max'], nbins)
         y = np.logspace(pars['log_lambda_min'], pars['log_lambda_max'], nbins)
         z = np.linspace(s['zmin'], s['zmax'], nbins)
-        print(z)
         
         print(f'Creating SED grid in band {band}')
         
@@ -415,9 +414,6 @@ class DemographicModel:
                                                   bounds_error=False, fill_value=None)
         fn_M_i_model = RegularGridInterpolator((np.log10(x), np.log10(y)), M_i_model,
                                                bounds_error=False, fill_value=None)
-        
-        #m_band_0 = -2.5*np.log10(f_lambda_band.value) - bandpass.AB_zero_mag
-        #M_band_0 = m_band - 5*np.log10(d_L.to(u.pc).value) + 5 # This is M_band(z)
                 
         for k, seed in enumerate(pars['seed_dict']):
             
@@ -458,6 +454,9 @@ class DemographicModel:
         
         s['lc_t_obs'] = t_obs
         
+        color_var = [np.random.normal(0.0, 0.3, size=ndraw_dim) for j in range(nbootstrap)]
+        color_var = np.array(color_var)
+        
         for k, seed in enumerate(pars['seed_dict']):
             
             print(f'Sampling light curves with seeding mechanism {seed}')
@@ -493,8 +492,7 @@ class DemographicModel:
                 else:
                     print("Not suppoerted")
                 
-                #L_band_host = f_host * M_star/(1*u.Msun) / 10**(b*g_minus_r + a + np.random.normal(0.0, 0.3, size=ndraw))*u.Lsun
-                L_band_host = f_host * M_star/(1*u.Msun) / 10**(b*g_minus_r + a)*u.Lsun
+                L_band_host = f_host * (M_star/(1*u.Msun) / 10**(b*g_minus_r + a + color_var[j,:ndraw]))*u.Lsun
                 L_band_host = L_band_host.to(u.erg/u.s)
                 s[f'L_host_{band}_{seed}'][j,:ndraw] = L_band_host
 
