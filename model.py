@@ -258,13 +258,14 @@ class DemographicModel:
         # 1. Assign number of draws
         d_c_min = 0.5*u.Mpc
         samples['zmax'] = zmax
-        samples['zmin'] = 0.0 #z_at_value(cosmo.comoving_distance, d_c_min, zmin=-0.001, zmax=zmax+0.001)
+        samples['zmin'] = 1e-8 #z_at_value(cosmo.comoving_distance, d_c_min, zmin=-0.001, zmax=zmax+0.001)
         V = cosmo.comoving_volume(zmax)*omega/(4*np.pi)
         pars['V'] = V
         d_c_min = cosmo.comoving_distance(samples['zmin'])
-        d_c_samples = np.linspace(d_c_min, cosmo.comoving_distance(zmax).to(u.Mpc), 100, dtype=dtype)
+        d_c_samples = np.linspace(d_c_min.to(u.Mpc), cosmo.comoving_distance(zmax).to(u.Mpc), 100, dtype=dtype)
         z_samples = np.array([z_at_value(cosmo.comoving_distance, d_c, zmin=-0.001, zmax=zmax+0.001)
                               for d_c in d_c_samples])
+        print(z_samples)
 
         # 2. Draw from the stellar mass function
         samples['M_star_draw'] = np.full([nbootstrap, ndraw_dim], np.nan, dtype=dtype)*u.Msun
@@ -393,6 +394,7 @@ class DemographicModel:
         x = np.logspace(pars['log_M_BH_min'], pars['log_M_BH_max'], nbins)
         y = np.logspace(pars['log_lambda_min'], pars['log_lambda_max'], nbins)
         z = np.linspace(s['zmin'], s['zmax'], nbins)
+        print(z)
         
         print(f'Creating SED grid in band {band}')
         
