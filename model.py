@@ -37,9 +37,11 @@ def f_occ_Bellovary19(M_star):
 
 def _ERDF(lambda_Edd):
     xi = 1
-    lambda_br = 10**(-1.84) #10**(-1.84) # + np.random.normal(0, np.mean([0.30, 0.37])))
-    delta1 = 2.0 #0.47 #+ np.random.normal(0, np.mean([0.20, 0.42]))
-    delta2 = 2.53 #2.53 #+ np.random.normal(0, np.mean([0.68, 0.38]))
+    # Lbr = 10**38.1 lambda_br M_BH_br
+    # 10^41.67 = 10^38.1 * 10^x * 10^10.66
+    lambda_br = 10**(-7.09) #10**(-1.84) # + np.random.normal(0, np.mean([0.30, 0.37])))
+    delta1 = 1.8 #0.47 #+ np.random.normal(0, np.mean([0.20, 0.42]))
+    delta2 = 2.6 #2.53 #+ np.random.normal(0, np.mean([0.68, 0.38]))
     # https://ui.adsabs.harvard.edu/abs/2019ApJ...883..139S/abstract
     # What sets the break? Transfer from radiatively efficient to inefficient accretion?
     return xi * ((lambda_Edd/lambda_br)**delta1 + (lambda_Edd/lambda_br)**delta2)**-1 # dN / dlog lambda
@@ -205,7 +207,7 @@ class DemographicModel:
         self.samples = {}
         
 
-    def sample(self, nbins=10, nbootstrap=50, eta=1e4, zmax=0.1, ndraw_dim=1e7, k_X=20, omega=4*np.pi,
+    def sample(self, nbins=10, nbootstrap=50, eta=1e4, zmax=0.1, ndraw_dim=1e7, omega=4*np.pi,
                seed_dict={'dc':(lambda x: np.ones_like(x)), 'popIII':f_occ_Bellovary19}):
 
         """
@@ -216,7 +218,6 @@ class DemographicModel:
         eta: Understamping factor (each MC data point corresponds to eta real galaxies)
         zmax:
         ndraw_dim: 
-        k_X: X-ray bolometric correction (ERDF->L_bol)
         occ_dict: Dictonary of occupation fractions to use
         """
         
@@ -229,7 +230,7 @@ class DemographicModel:
         pars['ndraw_dim'] = ndraw_dim
         pars['seed_dict'] = seed_dict
         
-        pars['log_lambda_min'] = -4.5
+        pars['log_lambda_min'] = -3.2
         pars['log_lambda_max'] = 1
         
         pars['log_M_star_min'] = 4.5
@@ -351,7 +352,7 @@ class DemographicModel:
                 samples[f'n_i_M_{seed}'][j,:], _ = np.histogram(M_BH_draw_seed, bins=M_BH_)
 
                 # 6. AGN Luminosity Function
-                L_draw_seed = k_X * lambda_draw * 1.26e38 * M_BH_draw_seed.to(u.Msun).value * u.erg/u.s
+                L_draw_seed = lambda_draw * 1.26e38 * M_BH_draw_seed.to(u.Msun).value * u.erg/u.s
                 samples[f'L_draw_{seed}'][j,:ndraw] = L_draw_seed
                 samples[f'n_i_L_{seed}'][j,:], _ = np.histogram(samples[f'L_draw_{seed}'][j,:ndraw], bins=L_)
 
@@ -440,7 +441,7 @@ class DemographicModel:
                 self.samples[f'M_i_{seed}'][j,:ndraw][mask_occ] = fn_M_i_model(points_2)
     
     
-    def sample_light_curves(self, t_obs, dt_min=10, band='SDSS_g', f_host=0.2,  g_minus_r=0.4, mag_lim=np.inf):
+    def sample_light_curves(self, t_obs, dt_min=10, band='SDSS_g', f_host=0.2, mag_lim=np.inf):
         
         pars = self.pars
         s = self.samples
@@ -456,6 +457,9 @@ class DemographicModel:
         
         color_var = [np.random.normal(0.0, 0.3, size=ndraw_dim) for j in range(nbootstrap)]
         color_var = np.array(color_var)
+        
+        g_minus_r = [np.random.normal(0.4, 0.1, size=ndraw_dim) for j in range(nbootstrap)]
+        g_minus_r = np.array(g_minus_r)
         
         for k, seed in enumerate(pars['seed_dict']):
             
@@ -492,7 +496,7 @@ class DemographicModel:
                 else:
                     print("Not suppoerted")
                 
-                L_band_host = f_host * (M_star/(1*u.Msun) / 10**(b*g_minus_r + a + color_var[j,:ndraw]))*u.Lsun
+                L_band_host = f_host * (M_star/(1*u.Msun) / 10**(b*g_minus_r[j,:ndraw] + a + color_var[j,:ndraw]))*u.Lsun
                 L_band_host = L_band_host.to(u.erg/u.s)
                 s[f'L_host_{band}_{seed}'][j,:ndraw] = L_band_host
 
@@ -505,11 +509,9 @@ class DemographicModel:
                 # Color correction
                 if band == 'GROUND_COUSINS_R':
                     # http://www.sdss3.org/dr8/algorithms/sdssUBVRITransform.php#Lupton2005
-                    m_band = m_band - 0.1837*g_minus_r - 0.0971 # R = ...
+                    m_band = m_band - 0.1837*g_minus_r[j,:ndraw] - 0.0971 # R = ...
                 s[f'm_{band}_{seed}'][j,:ndraw] = m_band
-                
-                
-                
+                                
                 ##### Host
                 f_band = (L_band_host) / (4*np.pi*d_L**2)
                 f_lambda_band = (f_band / lib[band].lpivot).to(u.erg/u.s/u.cm**2/u.AA)
