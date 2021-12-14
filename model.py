@@ -320,6 +320,7 @@ class DemographicModel:
                                                         phi2[j]*(pars['M_star']/M_br[j])**alpha2[j]) * dM_star/M_br[j]
             # phi = dN / dlog M
             sf = V.to(u.Mpc**3).value / eta * trapz((phidM/dM_star).value, pars['M_star'].value) # Normalization
+            # Try taking log of (phidM/dM_star).value and sampling from that?
             M_star_draw = inv_transform_sampling((phidM/dM_star).value, M_star_.value, survival=sf)*u.Msun
             ndraw = len(M_star_draw)
             samples['ndraws'][j] = ndraw
@@ -354,7 +355,7 @@ class DemographicModel:
                 # 6. AGN Luminosity Function
                 L_draw_seed = lambda_draw * 1.26e38 * M_BH_draw_seed.to(u.Msun).value * u.erg/u.s
                 samples[f'L_draw_{seed}'][j,:ndraw] = L_draw_seed
-                samples[f'n_i_L_{seed}'][j,:], _ = np.histogram(samples[f'L_draw_{seed}'][j,:ndraw], bins=L_)
+                samples[f'n_i_L_{seed}'][j,:], _ = np.histogram(L_draw_seed, bins=L_)
 
         # Correct for numerical factor and save the results
         for key in samples.keys():
@@ -513,7 +514,7 @@ class DemographicModel:
                 s[f'm_{band}_{seed}'][j,:ndraw] = m_band
                                 
                 ##### Host
-                f_band = (L_band_host) / (4*np.pi*d_L**2)
+                f_band = L_band_host / (4*np.pi*d_L**2)
                 f_lambda_band = (f_band / lib[band].lpivot).to(u.erg/u.s/u.cm**2/u.AA)
                 # Get apparent magnitude of just host galaxy
                 m_band = -2.5*np.log10(f_lambda_band.value) - lib[band].AB_zero_mag
@@ -525,7 +526,7 @@ class DemographicModel:
 
                 # Host-galaxy dilution
                 dL = L_band_AGN*np.log(10)/2.5*SFinf
-                SFinf = 2.5/np.log(10)*dL/(L_band_AGN + L_band_host)
+                SFinf = 2.5/np.log(10)*dL/(L_band_AGN + L_band_host)*1.3 # The 1.3 is to normalize with the qsos
 
                 mask_small = (SFinf < 1e-2) | (M_BH == 0.0)
                 
@@ -570,12 +571,14 @@ class DemographicModel:
         pars = self.pars
         samples = self.samples
         
-        V = pars['V']
-        n_i_M = samples['n_i_M']
-        n_i_Edd = samples['n_i_Edd']
+        ndraw_dim = int(np.max(samples['ndraws']))
         
-        M_star_draw = samples['M_star_draw']
-        M_BH_draw = samples['M_BH_draw']
+        V = pars['V']
+        n_i_M = samples['n_i_M'][:,:ndraw_dim]
+        n_i_Edd = samples['n_i_Edd'][:,:ndraw_dim]
+        
+        M_star_draw = samples['M_star_draw'][:,:ndraw_dim]
+        M_BH_draw = samples['M_BH_draw'][:,:ndraw_dim]
         
         M_star_ = pars['M_star_']
         
@@ -613,8 +616,6 @@ class DemographicModel:
         axs[0].scatter(10**x, y*1e-3, c='r', marker='x')
 
         # 3. BH Occupation fraction
-        #axs[1].plot(M_star, f_popIII, lw=3, color='b', alpha=0.5)
-        #axs[1].scatter(M_star, f_popIII, lw=3, color='b')
         nbootstrap = pars['nbootstrap']
 
         for k, seed in enumerate(pars['seed_dict']):
@@ -648,9 +649,9 @@ class DemographicModel:
 
         # 
         for k, seed in enumerate(pars['seed_dict']):
-            axs[3].fill_between(M_BH, np.nanpercentile(samples[f'n_i_M_{seed}'], 16, axis=0)/dlogM_BH/V,
-                                np.nanpercentile(samples[f'n_i_M_{seed}'], 84, axis=0)/dlogM_BH/V, color=seed_colors[k], alpha=0.5)
-            axs[3].scatter(M_BH, np.nanmean(samples[f'n_i_M_{seed}'], axis=0)/dlogM_BH/V, lw=3, color=seed_colors[k])
+            axs[3].fill_between(M_BH, np.nanpercentile(samples[f'n_i_M_{seed}'][:,:ndraw_dim], 16, axis=0)/dlogM_BH/V,
+                                np.nanpercentile(samples[f'n_i_M_{seed}'][:,:ndraw_dim], 84, axis=0)/dlogM_BH/V, color=seed_colors[k], alpha=0.5)
+            axs[3].scatter(M_BH, np.nanmean(samples[f'n_i_M_{seed}'][:,:ndraw_dim], axis=0)/dlogM_BH/V, lw=3, color=seed_colors[k])
 
         axs[3].set_xlabel(r'$M_{\rm{BH}}\ (M_{\odot})$', fontsize=18)
         axs[3].set_ylabel(r'$\phi(M_{\rm{BH}})$ (dex$^{-1}$ Mpc$^{-3}$)', fontsize=18)
@@ -673,9 +674,9 @@ class DemographicModel:
 
         # 6. AGN Luminosity Function
         for k, seed in enumerate(pars['seed_dict']):
-            axs[5].scatter(L, np.nanmean(samples[f'n_i_L_{seed}'], axis=0)/dlogL/V, lw=3, color=seed_colors[k])
-            axs[5].fill_between(L, np.nanpercentile(samples[f'n_i_L_{seed}'], 16, axis=0)/dlogL/V,
-                            np.nanpercentile(samples[f'n_i_L_{seed}'], 84, axis=0)/dlogL/V, color=seed_colors[k], alpha=0.5)
+            axs[5].scatter(L, np.nanmean(samples[f'n_i_L_{seed}'][:,:ndraw_dim], axis=0)/dlogL/V, lw=3, color=seed_colors[k])
+            axs[5].fill_between(L, np.nanpercentile(samples[f'n_i_L_{seed}'][:,:ndraw_dim], 16, axis=0)/dlogL/V,
+                            np.nanpercentile(samples[f'n_i_L_{seed}'][:,:ndraw_dim], 84, axis=0)/dlogL/V, color=seed_colors[k], alpha=0.5)
         
         # Real data
         # https://ui.adsabs.harvard.edu/abs/2009A%26A...507..781S/exportcitation
