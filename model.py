@@ -18,10 +18,45 @@ cosmo = FlatLambdaCDM(H0=70, Om0=0.3)
 import xspec
 from pyphot import astropy as pyphot
 
+from numba import njit
+
 lib = pyphot.get_library()
 
 # https://heasarc.gsfc.nasa.gov/xanadu/xspec/manual/node205.html#optxagnf
 xspec.Xset.allowPrompting = False
+
+def f_host_model(z, seed=None):
+    np.random.seed(seed)
+    return 3.25982199*z + 0.0645017 + np.random.normal(0, 0.12, size=len(z))
+
+def g_minus_r_model(M_stellar, seed=None):
+    np.random.seed(seed)
+    x = np.log10(M_stellar) - 10
+    return 0.03177466*x**2 + 0.25283705*x + 0.72109552 + np.random.normal(0, 0.3, size=len(M_stellar))
+
+def calc_sigma_var(mag, magerr):
+    
+    N = np.shape(mag)[0] # Number of light curves
+    nu = np.shape(mag)[1] - 1
+    
+    wt = 1/magerr**2
+    m0 = np.sum(mag*wt, axis=1)/np.sum(wt, axis=1)
+    m0 = np.array([m0]*(nu+1)).T # Reshape
+        
+    chisq = 1/nu*np.sum((mag - m0)**2*wt, axis=1)
+    
+    p = st.chi2.sf(chisq, nu) #1 - cdf
+    
+    log_p = np.log(p)
+    
+    sigma_var = np.zeros_like(p)
+    
+    mask_small = (log_p > -36)
+    
+    sigma_var[mask_small] = st.norm.ppf(1 - p[mask_small]/2)
+    sigma_var[~mask_small] = np.sqrt(np.log(2/np.pi) - 2*np.log(8.2) - 2*log_p[~mask_small])
+    
+    return sigma_var
 
 
 def f_occ_Bellovary19(M_star):
@@ -35,18 +70,35 @@ def f_occ_Bellovary19(M_star):
     return np.clip(f_interp, 0, 1)
     #return np.clip(np.random.normal(f_interp, df_interp), 0, 1)
 
+def ERDF(lambda_Edd, mass_bin='med', z=0.0):
+    xi = 10**(0.03*(1 + z) - 1.57)
+    delta2 = -0.03*(1 + z) + 2.27
+    
+    lambda_norm = 0 #-1.1
+    
+    if mass_bin == 'high':
+        lambda_br = 10**(0.70*(1 + z) - 2.60 + lambda_norm)
+        delta1 = -0.04*(1 + z) + 0.45
+    elif mass_bin == 'med':
+        lambda_br = 10**(0.68*(1 + z) - 2.05 + lambda_norm)
+        delta1 = -0.12*(1 + z) - 1.00
+    elif mass_bin == 'low':
+        lambda_br = 10**(1.27*(1 + z) - 2.53 + lambda_norm) # >-2.53
+        delta1 = 0.00*(1 + z) + 0.5 # <0.5
+        
+    erdf = xi * ((lambda_Edd/lambda_br)**delta1 + (lambda_Edd/lambda_br)**delta2)**-1
+    return erdf
+
 def _ERDF(lambda_Edd):
     xi = 1
     # Lbr = 10**38.1 lambda_br M_BH_br
     # 10^41.67 = 10^38.1 * 10^x * 10^10.66
-    lambda_br = 10**(-7.09) #10**(-1.84) # + np.random.normal(0, np.mean([0.30, 0.37])))
-    delta1 = 1.8 #0.47 #+ np.random.normal(0, np.mean([0.20, 0.42]))
-    delta2 = 2.6 #2.53 #+ np.random.normal(0, np.mean([0.68, 0.38]))
+    lambda_br = 10**(-1.84) #10**(-1.84) # + np.random.normal(0, np.mean([0.30, 0.37])))
+    delta1 = 0.47 #+ np.random.normal(0, np.mean([0.20, 0.42]))
+    delta2 = 2.53 #+ np.random.normal(0, np.mean([0.68, 0.38]))
     # https://ui.adsabs.harvard.edu/abs/2019ApJ...883..139S/abstract
     # What sets the break? Transfer from radiatively efficient to inefficient accretion?
     return xi * ((lambda_Edd/lambda_br)**delta1 + (lambda_Edd/lambda_br)**delta2)**-1 # dN / dlog lambda
-
-ERDF = np.vectorize(_ERDF) # I think we need to get rid of vectorize here!
 
 
 def get_AGN_flux(model_sed, M_BH=1e6, lambda_Edd=0.1, z=0.01, band='SDSS_g'):
@@ -114,6 +166,13 @@ def lambda_obs(L_bol):
     
     return np.clip(np.random.normal(lambda_obs, 0.1), 0, 1)
 
+@njit
+def drw(t_obs, x, xmean, SFinf, E, N):
+    for i in range(1, N):
+        dt = t_obs[i,:] - t_obs[i - 1,:]
+        x[i,:] = (x[i - 1,:] - dt * (x[i - 1,:] - xmean) + np.sqrt(2) * SFinf * E[i,:] * np.sqrt(dt))
+    return x
+
 
 def simulate_drw(t_rest, tau=300., z=2.0, xmean=0, SFinf=0.3):
 
@@ -124,14 +183,11 @@ def simulate_drw(t_rest, tau=300., z=2.0, xmean=0, SFinf=0.3):
 
     t_obs = t_rest * (1. + z) / tau
     
-    x = np.zeros([N, ndraw])
+    x = np.zeros((N, ndraw))
     x[0,:] = np.random.normal(xmean, SFinf)
-    E = np.random.normal(0, 1, [N, ndraw])
+    E = np.random.normal(0, 1, (N, ndraw))
     
-    for i in range(1, N):
-        dt = t_obs[i,:] - t_obs[i - 1,:]
-        x[i,:] = (x[i - 1,:] - dt * (x[i - 1,:] - xmean) + np.sqrt(2) * SFinf * E[i,:] * np.sqrt(dt))
-    return x
+    return drw(t_obs, x, xmean, SFinf, E, N)
 
 
 def draw_SFinf(lambda_RF, M_i, M_BH, size=1, randomize=True):
@@ -177,7 +233,6 @@ def inv_transform_sampling(y, x, n_samples=1000, survival=False):
     # https://tmramalho.github.io/blog/2013/12/16/how-to-do-inverse-transformation-sampling-in-scipy-and-numpy/
     # https://en.wikipedia.org/wiki/Inverse_transform_sampling
     dx = np.diff(x)
-    dlogx = np.diff(np.log10(x))
     cum_values = np.zeros(x.shape)
     cum_values[1:] = np.cumsum(y*dx)/np.sum(y*dx)
     inv_cdf = interp1d(cum_values, x, fill_value='extrapolate')
@@ -230,13 +285,13 @@ class DemographicModel:
         pars['ndraw_dim'] = ndraw_dim
         pars['seed_dict'] = seed_dict
         
-        pars['log_lambda_min'] = -3.2
-        pars['log_lambda_max'] = 1
+        pars['log_lambda_min'] = -7.0
+        pars['log_lambda_max'] = 1.0
         
         pars['log_M_star_min'] = 4.5
         pars['log_M_star_max'] = 12.5
         
-        pars['log_M_BH_min'] = 1.0
+        pars['log_M_BH_min'] = 1.5
         pars['log_M_BH_max'] = 9.5
 
         # Use galaxy mass function from https://ui.adsabs.harvard.edu/abs/2012MNRAS.421..621B/abstract
@@ -270,12 +325,7 @@ class DemographicModel:
 
         # 2. Draw from the stellar mass function
         samples['M_star_draw'] = np.full([nbootstrap, ndraw_dim], np.nan, dtype=dtype)*u.Msun
-        samples['M_star_draw_test'] = np.full([nbootstrap, ndraw_dim], np.nan, dtype=dtype)*u.Msun
         samples['n_i_M'] = np.full([nbootstrap, nbins], np.nan, dtype=np.int)
-
-        # 3. BH occupation fraction
-        f_popIII = np.ones_like(pars['M_star'].value) # light
-        f_dc = f_occ_Bellovary19(pars['M_star'].value) # dN / dlog lambda_EDD heavy
 
         # 4. BH Mass Function
         M_BH_ = np.logspace(pars['log_M_BH_min'], pars['log_M_BH_max'], nbins+1, dtype=dtype)*u.Msun
@@ -314,6 +364,8 @@ class DemographicModel:
         samples['ndraws'] = np.empty(nbootstrap, dtype=np.int)
         
         for j in tqdm(range(nbootstrap)):
+            
+            np.random.seed(j)
 
             # 2. Draw from stellar mass function
             phidM = np.exp(-pars['M_star']/M_br[j]) * (phi1[j]*(pars['M_star']/M_br[j])**alpha1[j] +
@@ -339,9 +391,26 @@ class DemographicModel:
             samples['M_BH_draw'][j,:ndraw] = M_BH_draw
             
             # 5. Eddington ratio Function
-            xi = ERDF(pars['lambda_Edd']) # dN / dlog lambda
-            xi = xi/np.sum(xi*dlambda) # Normalize
-            lambda_draw = inv_transform_sampling(xi/dlambda, lambda_, ndraw)
+            xi_hi = ERDF(pars['lambda_Edd'], mass_bin='high') # dN / dlog lambda
+            xi_med = ERDF(pars['lambda_Edd'], mass_bin='med') # dN / dlog lambda
+            xi_lo = ERDF(pars['lambda_Edd'], mass_bin='low') # dN / dlog lambda
+             # Normalize total ERDF
+            norm = trapz(xi_lo + xi_hi + xi_med, pars['lambda_Edd'])
+            xi_hi = xi_hi/norm
+            xi_med = xi_med/norm
+            xi_lo = xi_lo/norm
+            # Masks
+            mask_lo = (M_star_draw < 1e10*u.Msun)
+            mask_med = (M_star_draw > 1e10*u.Msun) & (M_star_draw < 1e11*u.Msun)
+            mask_hi = (M_star_draw > 1e11*u.Msun)
+            # Draw
+            lambda_draw_hi = inv_transform_sampling(xi_hi/dlambda, lambda_, np.count_nonzero(mask_hi))
+            lambda_draw_med = inv_transform_sampling(xi_lo/dlambda, lambda_, np.count_nonzero(mask_med)) ###
+            lambda_draw_lo = inv_transform_sampling(xi_lo/dlambda, lambda_, np.count_nonzero(mask_lo))
+            lambda_draw = np.full(ndraw, np.nan)
+            lambda_draw[mask_lo] = lambda_draw_lo
+            lambda_draw[mask_med] = lambda_draw_med
+            lambda_draw[mask_hi] = lambda_draw_hi
             samples['lambda_draw'][j,:ndraw] = lambda_draw
             samples['n_i_Edd'][j,:], _ = np.histogram(lambda_draw, bins=lambda_)
             
@@ -442,7 +511,7 @@ class DemographicModel:
                 self.samples[f'M_i_{seed}'][j,:ndraw][mask_occ] = fn_M_i_model(points_2)
     
     
-    def sample_light_curves(self, t_obs, dt_min=10, band='SDSS_g', f_host=0.2, mag_lim=np.inf):
+    def sample_light_curves(self, t_obs, dt_min=10, band='SDSS_g', SFinf_small=10**-2.5):
         
         pars = self.pars
         s = self.samples
@@ -455,13 +524,7 @@ class DemographicModel:
         t_rest_dense = np.arange(np.min(t_obs), np.max(t_obs), dt_min)
         
         s['lc_t_obs'] = t_obs
-        
-        color_var = [np.random.normal(0.0, 0.3, size=ndraw_dim) for j in range(nbootstrap)]
-        color_var = np.array(color_var)
-        
-        g_minus_r = [np.random.normal(0.4, 0.1, size=ndraw_dim) for j in range(nbootstrap)]
-        g_minus_r = np.array(g_minus_r)
-        
+                        
         for k, seed in enumerate(pars['seed_dict']):
             
             print(f'Sampling light curves with seeding mechanism {seed}')
@@ -495,9 +558,15 @@ class DemographicModel:
                     a = -0.840 # r
                     b = 1.654
                 else:
-                    print("Not suppoerted")
+                    print("Not supported")
+                    
+                # Distributions of colors, and aperture flux ratios
+                np.random.seed(j)
+                color_var = np.random.normal(0.0, 0.3, size=ndraw)
+                g_minus_r = g_minus_r_model(M_star.value, seed=j)
+                f_host = f_host_model(z, seed=j)
                 
-                L_band_host = f_host * (M_star/(1*u.Msun) / 10**(b*g_minus_r[j,:ndraw] + a + color_var[j,:ndraw]))*u.Lsun
+                L_band_host = f_host * (M_star/(1*u.Msun) / 10**(b*g_minus_r + a + color_var))*u.Lsun
                 L_band_host = L_band_host.to(u.erg/u.s)
                 s[f'L_host_{band}_{seed}'][j,:ndraw] = L_band_host
 
@@ -507,10 +576,11 @@ class DemographicModel:
 
                 # Get apparent magnitude of AGN + host galaxy
                 m_band = -2.5*np.log10(f_lambda_band.value) - lib[band].AB_zero_mag
+                
                 # Color correction
                 if band == 'GROUND_COUSINS_R':
                     # http://www.sdss3.org/dr8/algorithms/sdssUBVRITransform.php#Lupton2005
-                    m_band = m_band - 0.1837*g_minus_r[j,:ndraw] - 0.0971 # R = ...
+                    m_band = m_band - 0.1837*g_minus_r - 0.0971 # R = ...
                 s[f'm_{band}_{seed}'][j,:ndraw] = m_band
                                 
                 ##### Host
@@ -525,10 +595,10 @@ class DemographicModel:
                 tau = draw_tau(lambda_RF.to(u.AA).value, M_i_AGN, M_BH, size=ndraw)
 
                 # Host-galaxy dilution
-                dL = L_band_AGN*np.log(10)/2.5*SFinf
-                SFinf = 2.5/np.log(10)*dL/(L_band_AGN + L_band_host)*1.3 # The 1.3 is to normalize with the qsos
+                dL = L_band_AGN*np.log(10)/2.5*SFinf # The 1.3 is to normalize with the qsos
+                SFinf = 2.5/np.log(10)*dL/(L_band_AGN + L_band_host)
 
-                mask_small = (SFinf < 1e-2) | (M_BH == 0.0)
+                mask_small = (SFinf < SFinf_small) | (M_BH < 1e2)
                 
                 t_obs_dense_shaped = (np.array([t_obs_dense]*ndraw)[~mask_small]).T
                 t_rest_dense_shaped = (np.array([t_rest_dense]*ndraw)[~mask_small]).T / (1 + z[~mask_small])
@@ -561,7 +631,7 @@ class DemographicModel:
             return DemographicModel()
             
         
-    def plot(self, figsize=(3*6*0.9, 2*5*0.9), seed_colors=['b','m']):
+    def plot(self, figsize=(3*6*0.9, 2*5*0.9), seed_colors=['b','m'], seed_markers=['s','o']):
     
         import matplotlib.ticker as ticker
 
@@ -589,11 +659,8 @@ class DemographicModel:
         dlogM_star = np.diff(np.log10(M_star.value))[0]
         dlogM_BH = np.diff(np.log10(M_BH.value))[0]
         dloglambda = np.diff(np.log10(lambda_Edd))[0]
+        dlambda = np.diff(lambda_Edd)
         dlogL = np.diff(np.log10(L.value))[0]
-        
-        ## TODO: Generalize input
-        f_popIII = np.ones_like(M_star) # light
-        f_dc = f_occ_Bellovary19(M_star.value) # dN / dlog lambda_EDD heavy
                 
         # phi dM / dlogM
         axs[0].fill_between(M_star, np.nanpercentile(n_i_M, 16, axis=0)/dlogM_star/V,
@@ -615,7 +682,7 @@ class DemographicModel:
                       3.55,2.41,1.27,0.33,0.042,0.021,0.042])
         axs[0].scatter(10**x, y*1e-3, c='r', marker='x')
 
-        # 3. BH Occupation fraction
+        # 3. BH occupation fraction
         nbootstrap = pars['nbootstrap']
 
         for k, seed in enumerate(pars['seed_dict']):
@@ -624,8 +691,9 @@ class DemographicModel:
             for j in range(nbootstrap):
                 f[j,:] = pars['seed_dict'][f'{seed}'](M_star.value)
                 
-            axs[1].fill_between(M_star, np.percentile(f, 16, axis=0), np.percentile(f, 84, axis=0), color=seed_colors[k], alpha=0.5)
-            axs[1].scatter(M_star, np.nanmean(f, axis=0), lw=3, color=seed_colors[k])
+            axs[1].fill_between(M_star, np.percentile(f, 16, axis=0), np.percentile(f, 84, axis=0),
+                                color=seed_colors[k], alpha=0.5)
+            axs[1].scatter(M_star, np.nanmean(f, axis=0), lw=3, color=seed_colors[k], marker=seed_markers[k])
         
         axs[1].set_xlabel(r'$M_{\star}\ (M_{\odot})$', fontsize=18)
         axs[1].set_ylabel(r'$\lambda_{\rm{occ}}$', fontsize=18)
@@ -647,11 +715,12 @@ class DemographicModel:
         axs[2].set_ylabel(r'$M_{\rm{BH}}\ (M_{\odot})$', fontsize=18)
         axs[2].set_xlabel(r'$M_{\rm{\star}}\ (M_{\odot})$', fontsize=18)
 
-        # 
+        # BH mass function
         for k, seed in enumerate(pars['seed_dict']):
             axs[3].fill_between(M_BH, np.nanpercentile(samples[f'n_i_M_{seed}'][:,:ndraw_dim], 16, axis=0)/dlogM_BH/V,
                                 np.nanpercentile(samples[f'n_i_M_{seed}'][:,:ndraw_dim], 84, axis=0)/dlogM_BH/V, color=seed_colors[k], alpha=0.5)
-            axs[3].scatter(M_BH, np.nanmean(samples[f'n_i_M_{seed}'][:,:ndraw_dim], axis=0)/dlogM_BH/V, lw=3, color=seed_colors[k])
+            axs[3].scatter(M_BH, np.nanmean(samples[f'n_i_M_{seed}'][:,:ndraw_dim], axis=0)/dlogM_BH/V,
+                           lw=3, color=seed_colors[k], marker=seed_markers[k])
 
         axs[3].set_xlabel(r'$M_{\rm{BH}}\ (M_{\odot})$', fontsize=18)
         axs[3].set_ylabel(r'$\phi(M_{\rm{BH}})$ (dex$^{-1}$ Mpc$^{-3}$)', fontsize=18)
@@ -660,23 +729,29 @@ class DemographicModel:
         axs[3].set_xlim([1e2, 1e8])
         axs[3].set_ylim([1e-4, 1e0])
 
-        # 5. Eddington ratio Function
-        axs[4].scatter(lambda_Edd, np.nanmean(n_i_Edd, axis=0)/dloglambda, lw=3, color='k')
-        axs[4].fill_between(lambda_Edd, np.nanpercentile(n_i_Edd, 16, axis=0)/dloglambda,
-                            np.nanpercentile(n_i_Edd, 84, axis=0)/dloglambda, color='k', alpha=0.5)
+        # 5. Eddington ratio distribution (ERDF) function
+        norm = np.sum(np.nanmean(n_i_Edd, axis=0)*dloglambda)
+        axs[4].scatter(lambda_Edd, np.nanmean(n_i_Edd, axis=0)/dloglambda/norm, lw=3, color='k')
+        norm1 = np.sum(np.nanpercentile(n_i_Edd, 16, axis=0)*dloglambda)
+        norm2 = np.sum(np.nanpercentile(n_i_Edd, 84, axis=0)*dloglambda)
+        axs[4].fill_between(lambda_Edd, np.nanpercentile(n_i_Edd, 16, axis=0)/dloglambda/norm1,
+                            np.nanpercentile(n_i_Edd, 84, axis=0)/dloglambda/norm2, color='k', alpha=0.5)
 
         axs[4].set_xlabel(r'$\lambda_{\rm{Edd}}$', fontsize=18)
         axs[4].set_ylabel(r'$\xi$ (dex$^{-1}$)', fontsize=18)
         axs[4].set_xscale('log')
         axs[4].set_yscale('log')
-        axs[4].set_xlim([10**pars['log_lambda_min'], 10**pars['log_lambda_max']])
+        #axs[4].set_xlim([10**pars['log_lambda_min'] + dlambda[0], 10**pars['log_lambda_max']])
+        axs[4].set_xlim([1e-5, 10**pars['log_lambda_max']])
         #axs[4].set_ylim([1e-8, 1e1])
 
         # 6. AGN Luminosity Function
         for k, seed in enumerate(pars['seed_dict']):
-            axs[5].scatter(L, np.nanmean(samples[f'n_i_L_{seed}'][:,:ndraw_dim], axis=0)/dlogL/V, lw=3, color=seed_colors[k])
+            axs[5].scatter(L, np.nanmean(samples[f'n_i_L_{seed}'][:,:ndraw_dim], axis=0)/dlogL/V,
+                           lw=3, color=seed_colors[k], marker=seed_markers[k])
             axs[5].fill_between(L, np.nanpercentile(samples[f'n_i_L_{seed}'][:,:ndraw_dim], 16, axis=0)/dlogL/V,
-                            np.nanpercentile(samples[f'n_i_L_{seed}'][:,:ndraw_dim], 84, axis=0)/dlogL/V, color=seed_colors[k], alpha=0.5)
+                            np.nanpercentile(samples[f'n_i_L_{seed}'][:,:ndraw_dim], 84, axis=0)/dlogL/V,
+                                color=seed_colors[k], alpha=0.5)
         
         # Real data
         # https://ui.adsabs.harvard.edu/abs/2009A%26A...507..781S/exportcitation
@@ -713,13 +788,13 @@ class DemographicModel:
             ax.text(0.02, 0.93, f'({labels[i]})', transform=ax.transAxes, fontsize=16, weight='bold', zorder=10)
             ax.tick_params(axis='x', which='major', pad=7)
 
-            #ax.tick_params('both', labelsize=18)
-            #ax.tick_params('both', labelsize=18)
-            #ax.tick_params(axis='both', which='both', direction='in')
-            #ax.tick_params(axis='both', which='major', length=6)
-            #ax.tick_params(axis='both', which='minor', length=3)
-            #ax.xaxis.set_ticks_position('both')
-            #ax.yaxis.set_ticks_position('both')
+            ax.tick_params('both', labelsize=18)
+            ax.tick_params('both', labelsize=18)
+            ax.tick_params(axis='both', which='both', direction='in')
+            ax.tick_params(axis='both', which='major', length=6)
+            ax.tick_params(axis='both', which='minor', length=3)
+            ax.xaxis.set_ticks_position('both')
+            ax.yaxis.set_ticks_position('both')
 
             ax.xaxis.set_major_locator(ticker.LogLocator(base=10))
             #ax.yaxis.set_major_locator(ticker.LogLocator(base=10))
