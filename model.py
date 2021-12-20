@@ -27,7 +27,8 @@ xspec.Xset.allowPrompting = False
 
 def f_host_model(z, seed=None):
     np.random.seed(seed)
-    return 3.25982199*z + 0.0645017 + np.random.normal(0, 0.12, size=len(z))
+    log_f_host = -370.54432837*z**2 + 36.62199154*z -1.64364977 + np.random.normal(0, 0.3, size=len(z))
+    return np.clip(10**log_f_host, 0, 1)
 
 def g_minus_r_model(M_stellar, seed=None):
     np.random.seed(seed)
@@ -74,7 +75,7 @@ def ERDF(lambda_Edd, mass_bin='med', z=0.0):
     xi = 10**(0.03*(1 + z) - 1.57)
     delta2 = -0.03*(1 + z) + 2.27
     
-    lambda_norm = 0 #-1.1
+    lambda_norm = 0 #-3.0
     
     if mass_bin == 'high':
         lambda_br = 10**(0.70*(1 + z) - 2.60 + lambda_norm)
@@ -404,7 +405,7 @@ class DemographicModel:
             mask_med = (M_star_draw > 1e10*u.Msun) & (M_star_draw < 1e11*u.Msun)
             mask_hi = (M_star_draw > 1e11*u.Msun)
             # Draw
-            lambda_draw_hi = inv_transform_sampling(xi_hi/dlambda, lambda_, np.count_nonzero(mask_hi))
+            lambda_draw_hi = inv_transform_sampling(xi_lo/dlambda, lambda_, np.count_nonzero(mask_hi))
             lambda_draw_med = inv_transform_sampling(xi_lo/dlambda, lambda_, np.count_nonzero(mask_med)) ###
             lambda_draw_lo = inv_transform_sampling(xi_lo/dlambda, lambda_, np.count_nonzero(mask_lo))
             lambda_draw = np.full(ndraw, np.nan)
@@ -511,7 +512,7 @@ class DemographicModel:
                 self.samples[f'M_i_{seed}'][j,:ndraw][mask_occ] = fn_M_i_model(points_2)
     
     
-    def sample_light_curves(self, t_obs, dt_min=10, band='SDSS_g', SFinf_small=10**-2.5):
+    def sample_light_curves(self, t_obs, dt_min=10, band='SDSS_g', SFinf_small=1e-2):
         
         pars = self.pars
         s = self.samples
