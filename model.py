@@ -27,7 +27,7 @@ xspec.Xset.allowPrompting = False
 
 def f_host_model(z, seed=None):
     np.random.seed(seed)
-    log_f_host = -370.54432837*z**2 + 36.62199154*z -1.64364977 + np.random.normal(0, 0.3, size=len(z))
+    log_f_host = -370.54432837*z**2 + 36.62199154*z -1.64364977 + np.random.normal(0, 0.34, size=len(z))
     return np.clip(10**log_f_host, 0, 1)
 
 def g_minus_r_model(M_stellar, seed=None):
@@ -71,11 +71,11 @@ def f_occ_Bellovary19(M_star):
     return np.clip(f_interp, 0, 1)
     #return np.clip(np.random.normal(f_interp, df_interp), 0, 1)
 
-def ERDF(lambda_Edd, mass_bin='med', z=0.0):
+def _ERDF(lambda_Edd, mass_bin='med', z=0.0):
     xi = 10**(0.03*(1 + z) - 1.57)
     delta2 = -0.03*(1 + z) + 2.27
     
-    lambda_norm = 0 #-3.0
+    lambda_norm = 0.0 #-3.0
     
     if mass_bin == 'high':
         lambda_br = 10**(0.70*(1 + z) - 2.60 + lambda_norm)
@@ -90,7 +90,7 @@ def ERDF(lambda_Edd, mass_bin='med', z=0.0):
     erdf = xi * ((lambda_Edd/lambda_br)**delta1 + (lambda_Edd/lambda_br)**delta2)**-1
     return erdf
 
-def _ERDF(lambda_Edd):
+def ERDF(lambda_Edd):
     xi = 1
     # Lbr = 10**38.1 lambda_br M_BH_br
     # 10^41.67 = 10^38.1 * 10^x * 10^10.66
@@ -286,11 +286,15 @@ class DemographicModel:
         pars['ndraw_dim'] = ndraw_dim
         pars['seed_dict'] = seed_dict
         
-        pars['log_lambda_min'] = -7.0
+        """
+        pars['log_lambda_min'] = -7.8
+        pars['log_lambda_max'] = 1.0
+        """
+        pars['log_lambda_min'] = -4.5
         pars['log_lambda_max'] = 1.0
         
         pars['log_M_star_min'] = 4.5
-        pars['log_M_star_max'] = 12.5
+        pars['log_M_star_max'] = 12
         
         pars['log_M_BH_min'] = 1.5
         pars['log_M_BH_max'] = 9.5
@@ -392,6 +396,7 @@ class DemographicModel:
             samples['M_BH_draw'][j,:ndraw] = M_BH_draw
             
             # 5. Eddington ratio Function
+            """
             xi_hi = ERDF(pars['lambda_Edd'], mass_bin='high') # dN / dlog lambda
             xi_med = ERDF(pars['lambda_Edd'], mass_bin='med') # dN / dlog lambda
             xi_lo = ERDF(pars['lambda_Edd'], mass_bin='low') # dN / dlog lambda
@@ -412,6 +417,13 @@ class DemographicModel:
             lambda_draw[mask_lo] = lambda_draw_lo
             lambda_draw[mask_med] = lambda_draw_med
             lambda_draw[mask_hi] = lambda_draw_hi
+            """
+            
+            xi = ERDF(pars['lambda_Edd']) # dN / dlog lambda
+            norm = trapz(xi, pars['lambda_Edd'])
+            xi = xi/norm
+            lambda_draw = inv_transform_sampling(xi/dlambda, lambda_, ndraw)
+            
             samples['lambda_draw'][j,:ndraw] = lambda_draw
             samples['n_i_Edd'][j,:], _ = np.histogram(lambda_draw, bins=lambda_)
             
@@ -510,6 +522,13 @@ class DemographicModel:
                 # Need to set the luminosity to 0 if M_BH=0
                 self.samples[f'L_{band}_{seed}'][j,:ndraw][mask_occ] = (10**fn_L_band_model(points_3))*u.erg/u.s
                 self.samples[f'M_i_{seed}'][j,:ndraw][mask_occ] = fn_M_i_model(points_2)
+                
+                # Obscured fraction
+                p = 1 - lambda_obs(self.samples[f'L_draw_{seed}'].value[j,:ndraw][mask_occ])
+                L_band = self.samples[f'L_{band}_{seed}'][j,:ndraw][mask_occ]
+                L_band_obs = survival_sampling(L_band.value, survival=p, fill_value=0.0)*u.erg/u.s
+                self.samples[f'L_{band}_{seed}'][j,:ndraw][mask_occ] = L_band_obs
+                self.samples[f'M_i_{seed}'][j,:ndraw][mask_occ][L_band_obs.value==0] = np.nan
     
     
     def sample_light_curves(self, t_obs, dt_min=10, band='SDSS_g', SFinf_small=1e-2):
@@ -743,8 +762,8 @@ class DemographicModel:
         axs[4].set_xscale('log')
         axs[4].set_yscale('log')
         #axs[4].set_xlim([10**pars['log_lambda_min'] + dlambda[0], 10**pars['log_lambda_max']])
-        axs[4].set_xlim([1e-5, 10**pars['log_lambda_max']])
-        #axs[4].set_ylim([1e-8, 1e1])
+        #axs[4].set_xlim([1e-5, 10**pars['log_lambda_max']])
+        axs[4].set_xlim([1e-8, 1e1])
 
         # 6. AGN Luminosity Function
         for k, seed in enumerate(pars['seed_dict']):
