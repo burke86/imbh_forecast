@@ -31,7 +31,7 @@ def f_host_model(z, a=-0.1182058, b=3.30438841, c=0.01309727, seed=None):
     log_f_host = 1 - 1/(x**2 + b*x + c) + np.random.normal(0, 0.34, size=len(z))
     return np.clip(10**log_f_host, 0, 1)
 
-def g_minus_r_model(M_stellar, a=10.6067998, b=1.26228215, c=-0.21168494, seed=None):
+def g_minus_r_model(M_stellar, a=10.29707842, b=1.2622896, c=-0.2116654, seed=None):
     np.random.seed(seed)
     x = np.log10(M_stellar) - a
     return b**x + c + np.random.normal(0, 0.23, size=len(M_stellar))
@@ -348,7 +348,7 @@ class DemographicModel:
         pars['ndraw_dim'] = ndraw_dim
         pars['seed_dict'] = seed_dict
         
-        pars['log_lambda_min'] = -4.0
+        pars['log_lambda_min'] = -4.5 # -4
         pars['log_lambda_max'] = 1.0
         
         pars['log_M_star_min'] = 4.5
