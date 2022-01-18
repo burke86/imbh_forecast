@@ -142,9 +142,9 @@ def ERDF(lambda_Edd):
     xi = 1
     # Lbr = 10**38.1 lambda_br M_BH_br
     # 10^41.67 = 10^38.1 * 10^x * 10^10.66
-    lambda_br = 10**np.random.normal(-1.84, np.mean([0.30, 0.37]))
-    delta1 = np.random.normal(0.47, np.mean([0.20, 0.42]))
-    delta2 = np.random.normal(2.53, np.mean([0.68, 0.38]))
+    lambda_br = 10**-1.84 #10**np.random.normal(-1.84, np.mean([0.30, 0.37]))
+    delta1 =  0.47 #0.47 #np.random.normal(0.47, np.mean([0.20, 0.42]))
+    delta2 = 2.53 #np.random.normal(2.53, np.mean([0.68, 0.38]))
     # https://ui.adsabs.harvard.edu/abs/2019ApJ...883..139S/abstract
     # What sets the break? Transfer from radiatively efficient to inefficient accretion?
     return xi * ((lambda_Edd/lambda_br)**delta1 + (lambda_Edd/lambda_br)**delta2)**-1 # dN / dlog lambda
@@ -195,11 +195,11 @@ def lambda_obs(L_bol, seed=None, randomize=True):
     L_bol = (L_bol*u.erg/u.s).to(u.Lsun)
     
     if randomize:
-        a = np.random.normal(10.96, 0.06)
-        b = np.random.normal(11.93, 0.01)
-        c = np.random.normal(17.79, 0.10)
+        a = np.random.normal(10.96, 0.06, size=len(L_bol))
+        b = np.random.normal(11.93, 0.01, size=len(L_bol))
+        c = np.random.normal(17.79, 0.10, size=len(L_bol))
 
-        sig = np.random.normal(0.0, 0.27)
+        sig = np.random.normal(0.0, 0.2, size=len(L_bol))
     else:
         a = 10.96
         b = 11.93
@@ -207,19 +207,20 @@ def lambda_obs(L_bol, seed=None, randomize=True):
         sig = 0.0
     
     # https://ui.adsabs.harvard.edu/abs/2020A%26A...636A..73D/abstract
-    sgn = np.sign(sig) + (sig == 0)
-    k_X = a*(1 + (np.log10(L_bol/(1*u.Lsun))/b)**c) #+ sgn*np.log10(np.abs(sig))
+    k_X = a*(1 + (np.log10(L_bol/(1*u.Lsun))/b)**c)
     L_X = L_bol/k_X
     L_X = L_X.to(u.erg/u.s)
     
     A = 0.5 # Must be 0.5 so the range is betwen 0 and 1
-    l_0 = 43.89
+    l_0 = 43.89 + sig
     sigma_x = 0.46
     
     # https://ui.adsabs.harvard.edu/abs/2014MNRAS.437.3550M/abstract
     # Add 0.2 dex scatter 
     l_x = np.log10(L_X.value)
     lambda_obs = A + 1/np.pi*np.arctan((l_0 - l_x)/sigma_x)
+    
+    #return np.full_like(L_bol.value, 0)
     
     if randomize:
         return np.clip(np.random.normal(lambda_obs, 0.1), 0, 1)
@@ -257,7 +258,7 @@ def draw_SFinf(lambda_RF, M_i, M_BH, size=1, randomize=True):
         C = np.random.normal(0.118, 0.003, size=size)
         D = np.random.normal(0.118, 0.008, size=size)
         SFinf = 10**(A + B*np.log10(lambda_RF/4000) + C*(M_i + 23) + 
-                 D*np.log10(M_BH/1e9) + np.random.normal(0, 0.09, size=len(M_BH))) # Delta mag
+                 D*np.log10(M_BH/1e9)) # + np.random.normal(0, 0.09, size=len(M_BH))) # Delta mag
     else:
         A = -0.479
         B = -0.479
@@ -274,7 +275,7 @@ def draw_tau(lambda_RF, M_i, M_BH, size=1, randomize=True):
     if randomize:
         A = np.random.normal(2.0, 0.01, size=size)
         B = np.random.normal(0.17, 0.02, size=size)
-        C = 0 #np.random.normal(0.03, 0.04, size=size)
+        C = np.random.normal(0.03, 0.04, size=size)
         D = np.random.normal(0.38, 0.05, size=size)
         tau = 10**(A + B*np.log10(lambda_RF/4000) + C*(M_i + 23) + 
                  D*np.log10(M_BH/1e8) + np.random.normal(0, 0.09, size=size)) # days
@@ -348,7 +349,7 @@ class DemographicModel:
         pars['ndraw_dim'] = ndraw_dim
         pars['seed_dict'] = seed_dict
         
-        pars['log_lambda_min'] = -4.5 # -4
+        pars['log_lambda_min'] = -4 # -4
         pars['log_lambda_max'] = 1.0
         
         pars['log_M_star_min'] = 4.5
@@ -573,14 +574,14 @@ class DemographicModel:
                 self.samples[f'M_i_{seed}'][j,:ndraw][mask_occ] = fn_M_i_model(points_2)
                 
                 # Obscured fraction
-                p = 1 - lambda_obs(self.samples[f'L_draw_{seed}'].value[j,:ndraw][mask_occ])
+                p = 1 - lambda_obs(self.samples[f'L_draw_{seed}'].value[j,:ndraw][mask_occ], seed=j)
                 L_band = self.samples[f'L_{band}_{seed}'][j,:ndraw][mask_occ]
                 L_band_obs = survival_sampling(L_band.value, survival=p, fill_value=0.0)*u.erg/u.s
                 self.samples[f'L_{band}_{seed}'][j,:ndraw][mask_occ] = L_band_obs
                 self.samples[f'M_i_{seed}'][j,:ndraw][mask_occ][L_band_obs.value==0] = np.nan
     
     
-    def sample_light_curves(self, t_obs, dt_min=10, band='SDSS_g', SFinf_small=1e-2):
+    def sample_light_curves(self, t_obs, dt_min=10, band='SDSS_g', SFinf_small=10**-2.5):
         
         pars = self.pars
         s = self.samples
@@ -601,6 +602,7 @@ class DemographicModel:
             s[f'm_{band}_{seed}'] = np.full([nbootstrap, ndraw_dim], np.nan)
             s[f'm_host_{band}_{seed}'] = np.full([nbootstrap, ndraw_dim], np.nan)
             s[f'SFinf_{band}_{seed}'] = np.full([nbootstrap, ndraw_dim], np.nan)
+            s[f'SFinf0_{band}_{seed}'] = np.full([nbootstrap, ndraw_dim], np.nan)
             s[f'tau_RF_{band}_{seed}'] = np.full([nbootstrap, ndraw_dim], np.nan)
             s[f'L_host_{band}_{seed}'] = np.full([nbootstrap, ndraw_dim], np.nan)*u.erg/u.s
             s[f'g_minus_r_{seed}'] = np.full([nbootstrap, ndraw_dim], np.nan)
@@ -628,6 +630,9 @@ class DemographicModel:
                     b = 1.654
                 else:
                     print("Not supported")
+                    
+                ### TEST
+                #M_star = 1e11*u.Msun * 10**((np.log10(M_BH + np.random.normal(0.0, 0.5)) - 7.45)/1.05)
                     
                 # Distributions of colors, and aperture flux ratios
                 np.random.seed(j)
@@ -661,8 +666,11 @@ class DemographicModel:
                 s[f'm_host_{band}_{seed}'][j,:ndraw] = m_band
                 
                 # Draw SF_\infty and tau (rest-frame)
+                #M_i_AGN_Shen = 90 - 2.5*np.log10(L_bol_AGN.to(u.erg/u.s).value)
                 SFinf = draw_SFinf(lambda_RF.to(u.AA).value, M_i_AGN, M_BH, size=ndraw)
                 tau = draw_tau(lambda_RF.to(u.AA).value, M_i_AGN, M_BH, size=ndraw)
+                
+                s[f'SFinf0_{band}_{seed}'][j,:ndraw] = SFinf
 
                 # Host-galaxy dilution
                 dL = L_band_AGN*np.log(10)/2.5*SFinf # The 1.3 is to normalize with the qsos
@@ -673,8 +681,6 @@ class DemographicModel:
                 shape = np.count_nonzero(~mask_small)
                 t_obs_dense_shaped = (np.array([t_obs_dense]*shape)).T
                 t_rest_dense_shaped = (np.array([t_rest_dense]*shape)).T / (1 + z[~mask_small])
-                #t_obs_dense_shaped = (np.array([t_obs_dense]*ndraw)[~mask_small]).T
-                #t_rest_dense_shaped = (np.array([t_rest_dense]*ndraw)[~mask_small]).T / (1 + z[~mask_small])
 
                 s[f'SFinf_{band}_{seed}'][j,:ndraw] = SFinf
                 s[f'tau_RF_{band}_{seed}'][j,:ndraw] = tau
