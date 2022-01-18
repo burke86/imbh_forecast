@@ -602,7 +602,6 @@ class DemographicModel:
             s[f'm_{band}_{seed}'] = np.full([nbootstrap, ndraw_dim], np.nan)
             s[f'm_host_{band}_{seed}'] = np.full([nbootstrap, ndraw_dim], np.nan)
             s[f'SFinf_{band}_{seed}'] = np.full([nbootstrap, ndraw_dim], np.nan)
-            s[f'SFinf0_{band}_{seed}'] = np.full([nbootstrap, ndraw_dim], np.nan)
             s[f'tau_RF_{band}_{seed}'] = np.full([nbootstrap, ndraw_dim], np.nan)
             s[f'L_host_{band}_{seed}'] = np.full([nbootstrap, ndraw_dim], np.nan)*u.erg/u.s
             s[f'g_minus_r_{seed}'] = np.full([nbootstrap, ndraw_dim], np.nan)
@@ -631,47 +630,64 @@ class DemographicModel:
                 else:
                     print("Not supported")
                     
-                ### TEST
-                #M_star = 1e11*u.Msun * 10**((np.log10(M_BH + np.random.normal(0.0, 0.5)) - 7.45)/1.05)
-                    
                 # Distributions of colors, and aperture flux ratios
                 np.random.seed(j)
                 color_var = np.random.normal(0.0, 0.3, size=ndraw)
                 g_minus_r = g_minus_r_model(M_star.value, seed=j)
                 f_host = f_host_model(z, seed=j)
                 
+                # This is r or g-band luminosity
                 L_band_host = f_host * (M_star/(1*u.Msun) / 10**(b*g_minus_r + a + color_var))*u.Lsun
                 L_band_host = L_band_host.to(u.erg/u.s)
                 s[f'g_minus_r_{seed}'][j,:ndraw] = g_minus_r
-                s[f'L_host_{band}_{seed}'][j,:ndraw] = L_band_host
-
+                
                 d_L = cosmo.comoving_distance(z).to(u.cm)
-                f_band = (L_band_host + L_band_AGN) / (4*np.pi*d_L**2)
-                f_lambda_band = (f_band / lib[band].lpivot).to(u.erg/u.s/u.cm**2/u.AA)
-
+                
                 # Get apparent magnitude of AGN + host galaxy
-                m_band = -2.5*np.log10(f_lambda_band.value) - lib[band].AB_zero_mag
-                
-                # Color correction
                 if band == 'GROUND_COUSINS_R':
+                    # r -> R color correction
+                    band_r = 'SDSS_r'
+                    
+                    # These are r-band fluxes from the M/L ratio
+                    f_band_AGN = L_band_AGN / (4*np.pi*d_L**2) # (R)
+                    f_band_host = L_band_host / (4*np.pi*d_L**2) # (r)
+                    f_lambda_band_AGN = (f_band_AGN / lib[band].lpivot).to(u.erg/u.s/u.cm**2/u.AA) # (R)
+                    f_lambda_band_host = (f_band_host / lib[band_r].lpivot).to(u.erg/u.s/u.cm**2/u.AA) # (r)
+                    
+                    # r-band magnitudes
+                    m_band_AGN = -2.5*np.log10(f_lambda_band_AGN.value) - lib[band].AB_zero_mag # (R)
+                    r_band_host = -2.5*np.log10(f_lambda_band_host.value) - lib[band_r].AB_zero_mag # (r)
+                    
                     # http://www.sdss3.org/dr8/algorithms/sdssUBVRITransform.php#Lupton2005
-                    m_band = m_band - 0.1837*g_minus_r - 0.0971 # R = ...
+                    m_band_host = r_band_host - 0.1837*g_minus_r - 0.0971 # (R)
+                    
+                    # Magnitude addition formula AGN + host
+                    m_band = -2.5*np.log10(10**(-0.4*m_band_host) + 10**(-0.4*m_band_AGN)) # (R)
+                    
+                    # Convert back to luminosity in R
+                    f_lambda_band_host = 10**(-0.4*m_band_host) * lib[band].AB_zero_flux # (R)
+                    f_band_host = (f_lambda_band_host * lib[band].lpivot).to(u.erg/u.s/u.cm**2) # (R)
+                    L_band_host = f_band_host * (4*np.pi*d_L**2) # (R)
+                    
+                else:
+                    # No color correction
+                    f_band = (L_band_host + L_band_AGN) / (4*np.pi*d_L**2)
+                    #f_band_host = L_band_host / (4*np.pi*d_L**2)
+                    
+                    f_lambda_band = (f_band / lib[band].lpivot).to(u.erg/u.s/u.cm**2/u.AA)
+                    #f_lambda_band_host = (f_band_host / lib[band].lpivot).to(u.erg/u.s/u.cm**2/u.AA)
+                    
+                    m_band = -2.5*np.log10(f_lambda_band.value) - lib[band].AB_zero_mag
+                    #m_band_host = -2.5*np.log10(f_lambda_band_host.value) - lib[band].AB_zero_mag
+                    
+                # Fluxes
                 s[f'm_{band}_{seed}'][j,:ndraw] = m_band
+                s[f'L_host_{band}_{seed}'][j,:ndraw] = L_band_host
                                 
-                ##### Host
-                f_band = L_band_host / (4*np.pi*d_L**2)
-                f_lambda_band = (f_band / lib[band].lpivot).to(u.erg/u.s/u.cm**2/u.AA)
-                # Get apparent magnitude of just host galaxy
-                m_band = -2.5*np.log10(f_lambda_band.value) - lib[band].AB_zero_mag
-                s[f'm_host_{band}_{seed}'][j,:ndraw] = m_band
-                
                 # Draw SF_\infty and tau (rest-frame)
-                #M_i_AGN_Shen = 90 - 2.5*np.log10(L_bol_AGN.to(u.erg/u.s).value)
                 SFinf = draw_SFinf(lambda_RF.to(u.AA).value, M_i_AGN, M_BH, size=ndraw)
                 tau = draw_tau(lambda_RF.to(u.AA).value, M_i_AGN, M_BH, size=ndraw)
                 
-                s[f'SFinf0_{band}_{seed}'][j,:ndraw] = SFinf
-
                 # Host-galaxy dilution
                 dL = L_band_AGN*np.log(10)/2.5*SFinf # The 1.3 is to normalize with the qsos
                 SFinf = 2.5/np.log(10)*dL/(L_band_AGN + L_band_host)
