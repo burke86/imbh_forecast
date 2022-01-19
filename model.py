@@ -25,11 +25,43 @@ lib = pyphot.get_library()
 # https://heasarc.gsfc.nasa.gov/xanadu/xspec/manual/node205.html#optxagnf
 xspec.Xset.allowPrompting = False
 
-def f_host_model(z, a=-0.1182058, b=3.30438841, c=0.01309727, seed=None):
+def f_host_model(z, M_star, seed=None):
     np.random.seed(seed)
-    x = z - a
-    log_f_host = 1 - 1/(x**2 + b*x + c) + np.random.normal(0, 0.34, size=len(z))
-    return np.clip(10**log_f_host, 0, 1)
+    
+    log_M_star = np.log10(M_star)
+    
+    # Coefficients  a b c
+    c5 = np.array([-0.2210982, 30.3864133, -5.6608222])
+    c6 = np.array([-0.18302293, 49.3336501,  -8.01008124])
+    c7 = np.array([-0.22146297, 32.87370419, -6.30751403])
+    c8 = np.array([-0.30630442, 15.40596406, -3.78152073])
+    c9 = np.array([-0.40381538, 13.43175193, -4.56761656])
+    c10 = np.array([-0.36101119,  6.96839364, -1.58780549])
+    
+    # rms
+    sig5 = 0.6536516
+    sig6 = 0.49324566
+    sig7 = 0.42940333
+    sig8 = 0.33659458
+    sig9 = 0.32550654
+    sig10 = 0.28981143 # This is probably the most accurate
+    
+    cs = np.array([c5, c6, c7, c8, c9, c10])
+    sigs = np.array([sig5, sig6, sig7, sig8, sig9, sig10])
+    
+    mask5 = log_M_star < 6
+    mask6 = (log_M_star > 6) & (log_M_star < 7)
+    mask7 = (log_M_star > 7) & (log_M_star < 8)
+    mask8 = (log_M_star > 8) & (log_M_star < 9)
+    mask9 = (log_M_star > 9) & (log_M_star < 10)
+    mask10 = log_M_star > 10
+    
+    f_host = np.full_like(z, np.nan)
+    for i, mask in enumerate([mask5, mask6, mask7, mask8, mask9, mask10]):
+        x = z[mask] - cs[i][0]
+        f_host[mask] = 1 - 1/(x**2 + cs[i][1]*x + cs[i][2]+ np.random.normal(0, sig10, size=len(x))
+    
+    return np.clip(f_host, 0, 1)
 
 def g_minus_r_model(M_stellar, a=10.29707842, b=1.2622896, c=-0.2116654, seed=None):
     np.random.seed(seed)
@@ -75,10 +107,6 @@ def GSMF(M_star, z):
     # We have a phi(M_star,z) at every redshift
     phi = np.exp(-M_star/M_br)/M_br * (phi1*(M_star/M_br)**alpha1 + phi2*(M_star/M_br)**alpha2)
     
-    # I think? We want phi(M_star) weighted average across redshift
-    # Can i proove this?
-    
-    #return np.mean(phi, axis=1)
     return np.average(phi, axis=1, weights=wt)
         
 
@@ -634,7 +662,7 @@ class DemographicModel:
                 np.random.seed(j)
                 color_var = np.random.normal(0.0, 0.3, size=ndraw)
                 g_minus_r = g_minus_r_model(M_star.value, seed=j)
-                f_host = f_host_model(z, seed=j)
+                f_host = f_host_model(z, M_star.value, seed=j)
                 
                 # This is r or g-band luminosity
                 L_band_host = f_host * (M_star/(1*u.Msun) / 10**(b*g_minus_r + a + color_var))*u.Lsun
@@ -668,6 +696,7 @@ class DemographicModel:
                     f_lambda_band_host = 10**(-0.4*m_band_host) * lib[band].AB_zero_flux # (R)
                     f_band_host = (f_lambda_band_host * lib[band].lpivot).to(u.erg/u.s/u.cm**2) # (R)
                     L_band_host = f_band_host * (4*np.pi*d_L**2) # (R)
+                    L_band_host = L_band_host.to(u.erg/u.s)
                     
                 else:
                     # No color correction
