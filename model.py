@@ -7,6 +7,7 @@ import astropy.constants as const
 import scipy.stats as st
 from scipy.interpolate import interp1d, RegularGridInterpolator, LinearNDInterpolator
 from scipy.integrate import trapz, cumtrapz
+from astropy.io import fits
 
 import matplotlib.pyplot as plt
 from labellines import labelLine, labelLines
@@ -59,7 +60,7 @@ def f_host_model(z, M_star, seed=None):
     f_host = np.full_like(z, np.nan)
     for i, mask in enumerate([mask5, mask6, mask7, mask8, mask9, mask10]):
         x = z[mask] - cs[i][0]
-        f_host[mask] = 1 - 1/(x**2 + cs[i][1]*x + cs[i][2]+ np.random.normal(0, sig10, size=len(x))
+        f_host[mask] = 1 - 1/(x**2 + cs[i][1]*x + cs[i][2]) #+ np.random.normal(0, sig10, size=len(x))
     
     return np.clip(f_host, 0, 1)
 
@@ -214,8 +215,8 @@ def get_AGN_flux(model_sed, M_BH=1e6, lambda_Edd=0.1, z=0.01, band='SDSS_g'):
     #L_lambda = f_lambda*4*np.pi*d_L**2
     #L_bol_Shen = lambda_Edd*1.26e38*(M_BH.to(u.Msun).value)*u.erg/u.s
     #L_bol = np.trapz(L_lambda.to(u.erg/u.s/u.AA), x=wav.to(u.AA)).to(u.erg/u.s)
-    
-    return M_band, m_band, L_AGN_band.to(u.erg/u.s).value, f_band.to(u.erg/u.s/u.cm**2).value
+        
+    return M_band, m_band, L_AGN_band.to(u.erg/u.s).value, f_band.to(u.erg/u.s/u.cm**2).value, nuf_nu.to(u.erg/u.s/u.cm**2).value
 
 def lambda_obs(L_bol, seed=None, randomize=True):
     
@@ -305,6 +306,7 @@ def draw_tau(lambda_RF, M_i, M_BH, size=1, randomize=True):
         B = np.random.normal(0.17, 0.02, size=size)
         C = np.random.normal(0.03, 0.04, size=size)
         D = np.random.normal(0.38, 0.05, size=size)
+        # Use the pivot mass from Burke 2021
         tau = 10**(A + B*np.log10(lambda_RF/4000) + C*(M_i + 23) + 
                  D*np.log10(M_BH/1e8) + np.random.normal(0, 0.09, size=size)) # days
     else:
@@ -377,7 +379,7 @@ class DemographicModel:
         pars['ndraw_dim'] = ndraw_dim
         pars['seed_dict'] = seed_dict
         
-        pars['log_lambda_min'] = -4 # -4
+        pars['log_lambda_min'] = -4.0 # -4
         pars['log_lambda_max'] = 1.0
         
         pars['log_M_star_min'] = 4.5
@@ -528,7 +530,7 @@ class DemographicModel:
         self.samples = samples
         
         
-    def sample_sed_grid(self, w0=1e-5, w1=1e8, band='SDSS_g', model_sed_name='optxagnf', nbins=8,
+    def sample_sed_grid(self, w0=1e-3, w1=1e8, band='SDSS_g', model_sed_name='optxagnf', nbins=8,
                        sed_pars={'bh_mass':1e8,'dist_c':30.0,'lambda_edd':np.log10(0.1),'spin':0,'r_cor':100,
                                  'log_r_out':-1,'kT_e':0.2,'tau':10,'gamma':1.8,'f_pl':0.25,'z':0.007,'norm':1}):
         
@@ -560,13 +562,16 @@ class DemographicModel:
         print(f'Creating SED grid in band {band}')
         
         # Get AGN luminosity in band and M_i(z=2)
-        vget_AGN_flux = np.vectorize(get_AGN_flux)
+        vget_AGN_flux = np.vectorize(get_AGN_flux, otypes=[np.float,np.float,np.float,np.float,np.ndarray])
         
         X, Y, Z = np.meshgrid(x, y, z, indexing='ij', sparse=True)
-        _, _, L_band_model, _ = vget_AGN_flux(model_sed, M_BH=X, lambda_Edd=Y, z=Z, band=band)
+        _, _, L_band_model, _, nuf_nu = vget_AGN_flux(model_sed, M_BH=X, lambda_Edd=Y, z=Z, band=band)
         
         X, Y = np.meshgrid(x, y, indexing='ij', sparse=True)
-        M_i_model, _, _, _ = vget_AGN_flux(model_sed, M_BH=X, lambda_Edd=Y, z=2.0, band='SDSS_i')
+        M_i_model, _, _, _, _ = vget_AGN_flux(model_sed, M_BH=X, lambda_Edd=Y, z=2.0, band='SDSS_i')
+        
+        
+        # Or read from existing SED file
         
         self.samples[f'L_{band}_model'] = L_band_model*u.erg/u.s # Shape NxNxN
         self.samples['M_i_model'] = M_i_model # Shape NxNxN
@@ -607,9 +612,31 @@ class DemographicModel:
                 L_band_obs = survival_sampling(L_band.value, survival=p, fill_value=0.0)*u.erg/u.s
                 self.samples[f'L_{band}_{seed}'][j,:ndraw][mask_occ] = L_band_obs
                 self.samples[f'M_i_{seed}'][j,:ndraw][mask_occ][L_band_obs.value==0] = np.nan
+                
+                
+        energies = model_sed.energies(0)[::-1]*u.keV # Why N-1?
+        wav = (energies[:-1]).to(u.nm, equivalencies=u.spectral()) # RF
+        
+        c1 = fits.Column(name='log_M_BH', array=np.log10(x), format='D')
+        c2 = fits.Column(name='log_LAMBDA_EDD', array=np.log10(y), format='D')
+        c3 = fits.Column(name='Z', array=z, format='D')
+        table_hdu0 = fits.BinTableHDU.from_columns([c1, c2, c3])
+        
+        c1 = fits.Column(name='log_WAV', array=np.log10(wav.value), format='D')
+        table_hdu1 = fits.BinTableHDU.from_columns([c1])
+        
+        # Create FITS file
+        nuf_nu = np.array(nuf_nu.tolist())
+        hdu0 = fits.PrimaryHDU(nuf_nu)
+        
+        table_hdu = fits.HDUList([hdu0, table_hdu0, table_hdu1])
+        table_hdu.writeto('sed_grid.fits', overwrite=True)
+        # M_i can be obtained using the approximation M_i = 125 - 3.3 log(L_bol / erg s^−1)
+        
+        return
     
     
-    def sample_light_curves(self, t_obs, dt_min=10, band='SDSS_g', SFinf_small=10**-2.5):
+    def sample_light_curves(self, t_obs, dt_min=10, band='SDSS_g', SFinf_small=10**-2.5, m_5=25.0):
         
         pars = self.pars
         s = self.samples
@@ -664,7 +691,7 @@ class DemographicModel:
                 g_minus_r = g_minus_r_model(M_star.value, seed=j)
                 f_host = f_host_model(z, M_star.value, seed=j)
                 
-                # This is r or g-band luminosity
+                # This is r or g-band luminosity from the M/L ratio
                 L_band_host = f_host * (M_star/(1*u.Msun) / 10**(b*g_minus_r + a + color_var))*u.Lsun
                 L_band_host = L_band_host.to(u.erg/u.s)
                 s[f'g_minus_r_{seed}'][j,:ndraw] = g_minus_r
@@ -690,7 +717,8 @@ class DemographicModel:
                     m_band_host = r_band_host - 0.1837*g_minus_r - 0.0971 # (R)
                     
                     # Magnitude addition formula AGN + host
-                    m_band = -2.5*np.log10(10**(-0.4*m_band_host) + 10**(-0.4*m_band_AGN)) # (R)
+                    #m_band = -2.5*np.log10(10**(-0.4*m_band_host) + 10**(-0.4*m_band_AGN)) # (R)
+                    ## methinks AGN mag is too bright
                     
                     # Convert back to luminosity in R
                     f_lambda_band_host = 10**(-0.4*m_band_host) * lib[band].AB_zero_flux # (R)
@@ -698,16 +726,16 @@ class DemographicModel:
                     L_band_host = f_band_host * (4*np.pi*d_L**2) # (R)
                     L_band_host = L_band_host.to(u.erg/u.s)
                     
-                else:
-                    # No color correction
-                    f_band = (L_band_host + L_band_AGN) / (4*np.pi*d_L**2)
-                    #f_band_host = L_band_host / (4*np.pi*d_L**2)
-                    
-                    f_lambda_band = (f_band / lib[band].lpivot).to(u.erg/u.s/u.cm**2/u.AA)
-                    #f_lambda_band_host = (f_band_host / lib[band].lpivot).to(u.erg/u.s/u.cm**2/u.AA)
-                    
-                    m_band = -2.5*np.log10(f_lambda_band.value) - lib[band].AB_zero_mag
-                    #m_band_host = -2.5*np.log10(f_lambda_band_host.value) - lib[band].AB_zero_mag
+                #else:
+                # No color correction
+                f_band = (L_band_host + L_band_AGN) / (4*np.pi*d_L**2)
+                #f_band_host = L_band_host / (4*np.pi*d_L**2)
+
+                f_lambda_band = (f_band / lib[band].lpivot).to(u.erg/u.s/u.cm**2/u.AA)
+                #f_lambda_band_host = (f_band_host / lib[band].lpivot).to(u.erg/u.s/u.cm**2/u.AA)
+
+                m_band = -2.5*np.log10(f_lambda_band.value) - lib[band].AB_zero_mag
+                #m_band_host = -2.5*np.log10(f_lambda_band_host.value) - lib[band].AB_zero_mag
                     
                 # Fluxes
                 s[f'm_{band}_{seed}'][j,:ndraw] = m_band
@@ -721,7 +749,7 @@ class DemographicModel:
                 dL = L_band_AGN*np.log(10)/2.5*SFinf # The 1.3 is to normalize with the qsos
                 SFinf = 2.5/np.log(10)*dL/(L_band_AGN + L_band_host)
 
-                mask_small = (SFinf < SFinf_small) | (M_BH < 1e2)
+                mask_small = (SFinf < SFinf_small) | (M_BH < 1e2) | (m_band > m_5+1)
                 
                 shape = np.count_nonzero(~mask_small)
                 t_obs_dense_shaped = (np.array([t_obs_dense]*shape)).T
@@ -738,6 +766,9 @@ class DemographicModel:
                 s[f'lc_{band}_{seed}_{j}'] = f(t_obs)
                 s[f'lc_{band}_{seed}_idx'][j,ndraw:] = np.nan
                 s[f'lc_{band}_{seed}_idx'][j,:ndraw][mask_small] = np.nan
+                
+                
+                ## TODO:: To free some memory, we could sort everything by magnitude and throw away those > m_5
             
 
     def save(self, filepath='model.pickle'):
@@ -773,8 +804,8 @@ class DemographicModel:
         n_i_Edd = samples['n_i_Edd'][:,:ndraw_dim]
         
         # Clean
-        n_i_M[:,np.count_nonzero(n_i_M, axis=0) < n_bin_min] = np.nan
-        n_i_Edd[:,np.count_nonzero(n_i_Edd, axis=0) < n_bin_min] = np.nan
+        n_i_M[:,n_i_M[0] < n_bin_min] = np.nan
+        n_i_Edd[:,n_i_Edd[0] < n_bin_min] = np.nan
         
         M_star_draw = samples['M_star_draw'][:,:ndraw_dim]
         M_BH_draw = samples['M_BH_draw'][:,:ndraw_dim]
@@ -879,7 +910,7 @@ class DemographicModel:
         for k, seed in enumerate(pars['seed_dict']):
             
             n_i_L = samples[f'n_i_L_{seed}'][:,:ndraw_dim]
-            n_i_L[:,np.count_nonzero(n_i_L, axis=0) < n_bin_min] = np.nan
+            n_i_L[:,n_i_L[0] < n_bin_min] = np.nan
             
             axs[5].scatter(L, moct(n_i_L, axis=0)/dlogL/V,
                            lw=3, color=seed_colors[k], marker=seed_markers[k])
@@ -912,9 +943,9 @@ class DemographicModel:
         axs[5].set_xscale('log')
         axs[5].set_yscale('log')
         axs[5].set_xlim([1e36, 1e47])
-        #axs[5].set_ylim([1e-4, 1e1])
+        axs[5].set_ylim([1e-9, None])
 
-        import string
+        import string, matplotlib
         labels = list(string.ascii_lowercase)
 
         for i, ax in enumerate(axs):
@@ -930,8 +961,18 @@ class DemographicModel:
             ax.xaxis.set_ticks_position('both')
             ax.yaxis.set_ticks_position('both')
 
-            ax.xaxis.set_major_locator(ticker.LogLocator(base=10))
-            #ax.yaxis.set_major_locator(ticker.LogLocator(base=10))
+            locmaj = matplotlib.ticker.LogLocator(base=10,numticks=12) 
+            ax.xaxis.set_major_locator(locmaj)
+            locmin = matplotlib.ticker.LogLocator(base=10.0,subs=(0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9),numticks=12)
+            ax.xaxis.set_minor_locator(locmin)
+            ax.xaxis.set_minor_formatter(matplotlib.ticker.NullFormatter())
+            
+            if i != 1:
+                locmaj = matplotlib.ticker.LogLocator(base=10,numticks=12) 
+                ax.yaxis.set_major_locator(locmaj)
+                locmin = matplotlib.ticker.LogLocator(base=10.0,subs=(0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9),numticks=12)
+                ax.yaxis.set_minor_locator(locmin)
+                ax.yaxis.set_minor_formatter(matplotlib.ticker.NullFormatter())
 
 
         fig.tight_layout()
