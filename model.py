@@ -96,13 +96,23 @@ def g_minus_r_model_red(M_stellar, seed=None):
                     [0.0184602,  0.00646298]])
     return g_minus_r_model(M_stellar, mu, cov, seed=seed)
 
-def GSMF_blue(M_star):
+def GSMF_blue(M_star, z):
+    ratio = _GSMF_blue(M_star)/(_GSMF_red(M_star) + _GSMF_blue(M_star))
+    return ratio * GSMF(M_star, z)
+
+def GSMF_red(M_star, z):
+    ratio = _GSMF_red(M_star)/(_GSMF_red(M_star) + _GSMF_blue(M_star))
+    return ratio * GSMF(M_star, z)
+
+def _GSMF_blue(M_star):
+    # z=0
     M_br = 10**10.72
     phi = 0.71*1e-3
     alpha = -1.45
     return np.exp(-M_star/M_br)/M_br * phi*(M_star/M_br)**alpha
 
-def GSMF_red(M_star):
+def _GSMF_red(M_star):
+    # z=0
     M_br = 10**10.72
     phi1 = 3.25*1e-3
     phi2 = 0.08*1e-3
@@ -215,7 +225,7 @@ def ERDF_blue(lambda_Edd, xi=10**-1.65):
     # Lbr = 10**38.1 lambda_br M_BH_br
     # 10^41.67 = 10^38.1 * 10^x * 10^10.66
     lambda_br = 10**np.random.normal(-1.84, np.mean([0.30, 0.37]))
-    delta1 = np.random.normal(0.47-0.6, np.mean([0.20, 0.42]))
+    delta1 = np.random.normal(0.471-0.45, np.mean([0.20, 0.42]))
     delta2 = np.random.normal(2.53, np.mean([0.68, 0.38]))
     # https://ui.adsabs.harvard.edu/abs/2019ApJ...883..139S/abstract
     # What sets the break? Transfer from radiatively efficient to inefficient accretion?
@@ -228,7 +238,7 @@ def ERDF_red(lambda_Edd, xi=10**-2.13):
     # Lbr = 10**38.1 lambda_br M_BH_br
     # 10^41.67 = 10^38.1 * 10^x * 10^10.66
     lambda_br = 10**np.random.normal(-2.81, np.mean([0.22, 0.14]))
-    delta1 = np.random.normal(0.41-0.6, np.mean([0.02, 0.02]))
+    delta1 = np.random.normal(0.41-0.45, np.mean([0.02, 0.02]))
     delta2 = np.random.normal(1.22, np.mean([0.19, 0.13]))
     # https://ui.adsabs.harvard.edu/abs/2019ApJ...883..139S/abstract
     # What sets the break? Transfer from radiatively efficient to inefficient accretion?
@@ -433,7 +443,7 @@ class DemographicModel:
         pars['ndraw_dim'] = ndraw_dim
         pars['seed_dict'] = seed_dict
         
-        pars['log_lambda_min'] = -8.0
+        pars['log_lambda_min'] = -8.0 # -8
         pars['log_lambda_max'] = 1.0
         
         pars['log_M_star_min'] = 4.5
@@ -526,8 +536,8 @@ class DemographicModel:
             # 2. Draw from GSMF
             #phidM = GSMF(pars['M_star'].value, z_draw)*dM_star
             
-            phidM_blue = GSMF_blue(pars['M_star'].value)*dM_star
-            phidM_red = GSMF_red(pars['M_star'].value)*dM_star
+            phidM_blue = GSMF_blue(pars['M_star'].value, z_draw)*dM_star
+            phidM_red = GSMF_red(pars['M_star'].value, z_draw)*dM_star
             
             # phi = dN / dlog M
             #sf = V.to(u.Mpc**3).value / eta * trapz((phidM/dM_star).value, pars['M_star'].value) # Normalization
