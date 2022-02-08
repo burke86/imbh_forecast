@@ -418,7 +418,8 @@ class DemographicModel:
         
 
     def sample(self, nbins=10, nbootstrap=50, eta=1e4, zmax=0.1, ndraw_dim=1e7, omega=4*np.pi,
-               seed_dict={'dc':(lambda x: np.ones_like(x)), 'popIII':f_occ_Bellovary19}, ERDF_mode=0):
+               seed_dict={'dc':(lambda x: np.ones_like(x)), 'popIII':f_occ_Bellovary19},
+               ERDF_mode=0, log_edd_mu=-1, log_edd_sigma=0.2):
 
         """
         See https://iopscience.iop.org/article/10.3847/1538-4357/aa803b/pdf
@@ -535,7 +536,6 @@ class DemographicModel:
             
             # 2. Draw from GSMF
             #phidM = GSMF(pars['M_star'].value, z_draw)*dM_star
-            
             phidM_blue = GSMF_blue(pars['M_star'].value, z_draw)*dM_star
             phidM_red = GSMF_red(pars['M_star'].value, z_draw)*dM_star
             
@@ -590,7 +590,7 @@ class DemographicModel:
                 lambda_draw[mask_red] = inv_transform_sampling(xi_red/dlambda, lambda_, np.count_nonzero(mask_red))
             elif ERDF_mode == 1:
                 p = lambda_A(M_star_draw.value)
-                lambda_draw_init = 10**np.random.normal(-1, 0.2, ndraw)
+                lambda_draw_init = 10**np.random.normal(log_edd_mu, log_edd_sigma, ndraw)
                 lambda_draw = survival_sampling(lambda_draw_init, survival=p, fill_value=1e-8)
 
             samples['lambda_draw'][j,:ndraw] = lambda_draw
@@ -835,7 +835,6 @@ class DemographicModel:
                 s[f'L_host_{band}_{seed}'][j,:ndraw] = L_band_host
                                 
                 # Draw SF_\infty and tau (rest-frame)
-                ###### TODO#######
                 # In M10, M_i is basically a proxy for L_bol, so we need to use the Shen relation
                 # even for IMBHs, to preserve the linearity in the extrapolation of this relation
                 M_i_AGN = 90 - 2.5*np.log10(L_bol_AGN.to(u.erg/u.s).value)
