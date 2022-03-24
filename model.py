@@ -285,7 +285,7 @@ def ERDF_red(lambda_Edd, xi=10**-2.13):
     return xi * ((lambda_Edd/lambda_br)**delta1 + (lambda_Edd/lambda_br)**delta2)**-1 # dN / dlog lambda
 
 
-def get_RIAF_flux(wav, riaf_sed_path, M_BH=1e6, lambda_Edd=1e-4, z=0.01, s=0.3, p=0.3, band='SDSS_g'):
+def get_RIAF_flux(wav, riaf_sed_path, M_BH=1e6, lambda_Edd=1e-4, z=0.01, s=0.3, p=0.3, alpha=0.3, band='SDSS_g'):
     """
     Compute the SED of a radiatively inefficient accretion flow (RIAF) following Nemmen et al. 2006; Nemmen et al. 2014
     https://academic.oup.com/mnras/article/438/4/2804/2907740
@@ -303,7 +303,17 @@ def get_RIAF_flux(wav, riaf_sed_path, M_BH=1e6, lambda_Edd=1e-4, z=0.01, s=0.3, 
     R_s = 2*const.G*M_BH*u.Msun/(const.c**2)
     R_s = R_s.to(u.cm)
     R_g = 1/2*R_s
-    Ro = 100*R_g # outer disk radius
+    
+    # This equation is not valid, because this disk is truncated
+    eta = 0.0572 # for spin = 0
+    m9 = M_BH/1e9
+    L_bol = (lambda_Edd*1.26*1e38*M_BH)*u.erg/u.s
+    dotM = (L_bol/(eta*const.c**2)).to(u.Msun/u.yr)
+    dotm = (dotM/(38.8*m9*u.Msun/u.yr)).to(u.dimensionless_unscaled).value
+    r_sg = 2150 * m9**(-2/9) * dotm**(4/9) * alpha**(2/9)
+    R_sg = r_sg*R_g
+    
+    Ro = R_sg # outer disk radius = self-gravity radius https://articles.adsabs.harvard.edu/pdf/1989MNRAS.238..897L
     _Ro = Ro/R_s # outer radius in R_s units
         
     # compute the net mass accretion rate into the BH (Yuan et al. 2003)
@@ -313,24 +323,18 @@ def get_RIAF_flux(wav, riaf_sed_path, M_BH=1e6, lambda_Edd=1e-4, z=0.01, s=0.3, 
     # should be slightly larger accounting for mass loss from winds
     
     # Convert to fortran format
-    dotmo_str = '{:.2e}'.format(dotmo)
-    dotmo_str = dotmo_str.replace('e', 'd')
+    dotmo_str = '{:.2e}'.format(dotmo).replace('e', 'd')
+    M_BH6_str = '{:.2e}'.format(M_BH/1e6).replace('e', 'd')
+    Ro_str = '{:.2e}'.format(_Ro).replace('e', 'd')
+    d_pc_str = '{:.2e}'.format(d_L.to(u.pc).value).replace('e', 'd')
+    p_str = '{:.2e}'.format(p).replace('e', 'd')
+    alpha_str = '{:.2e}'.format(alpha).replace('e', 'd')
+    
     print(dotmo_str)
-    
-    M_BH6_str = '{:.2e}'.format(M_BH/1e6)
-    M_BH6_str = M_BH6_str.replace('e', 'd')
-    
-    Ro_str = '{:.2e}'.format(_Ro)
-    Ro_str = Ro_str.replace('e', 'd')
-    
-    d_pc_str = '{:.2e}'.format(d_L.to(u.pc).value)
-    d_pc_str = d_pc_str.replace('e', 'd')
-    
-    p_str = '{:.2e}'.format(p)
-    p_str = p_str.replace('e', 'd')
+    print(Ro_str)
     
     # Insert the parameters in the input file
-    txt = f'# Input parameters for ADAF model\n# ==================================\n#\n# Dynamics\n# ***************************\n# Adiabatic index gamma\ngamai=1.5d0\n# Black hole mass (in 10^6 Solar masses)\nm={M_BH6_str}\n# ratio of gas to total pressure\nbeta=0.9d0\n# alpha viscosity\nalfa=0.3d0\n# Fraction of turbulent dissipation that directly heats electrons\ndelta=0.2d0\n# Mdot_out (Eddington units)\ndotm0={dotmo_str}\n# R_out (units of R_S)\nrout={Ro_str}\n# p_wind ("strength of wind")\npp0={p_str}\n#\n# Range of eigenvalues of the problem (the "shooting" parameter)\n# Initial and final value, number of models to be computed\nsl0i=1.7\nsl0f=2.5\nnmodels=10\n#\n# Outer boundary conditions (OBCs)\n# T_i (ion temperature) in units of the Virial temperature\nti=0.6\n# T_e (electron temperature) \nte=0.08\n# Mach number=v_R/c_s (radial velocity/sound speed)\nvcs=0.5d0\n#\n# Name of log file\ndiag=out_01\n#\n# SED calculation\n# ***************************\n# distance (in pc)\ndistance={d_pc_str}\n# Inclination angle of outer thin disk (in degrees)\ntheta=30.\n# Spectrum filename\nspec=spec_01\n'
+    txt = f'# Input parameters for ADAF model\n# ==================================\n#\n# Dynamics\n# ***************************\n# Adiabatic index gamma\ngamai=1.5d0\n# Black hole mass (in 10^6 Solar masses)\nm={M_BH6_str}\n# ratio of gas to total pressure\nbeta=0.9d0\n# alpha viscosity\nalfa={alpha_str}\n# Fraction of turbulent dissipation that directly heats electrons\ndelta=0.2d0\n# Mdot_out (Eddington units)\ndotm0={dotmo_str}\n# R_out (units of R_S)\nrout={Ro_str}\n# p_wind ("strength of wind")\npp0={p_str}\n#\n# Range of eigenvalues of the problem (the "shooting" parameter)\n# Initial and final value, number of models to be computed\nsl0i=1.7\nsl0f=2.5\nnmodels=10\n#\n# Outer boundary conditions (OBCs)\n# T_i (ion temperature) in units of the Virial temperature\nti=0.6\n# T_e (electron temperature) \nte=0.08\n# Mach number=v_R/c_s (radial velocity/sound speed)\nvcs=0.5d0\n#\n# Name of log file\ndiag=out_01\n#\n# SED calculation\n# ***************************\n# distance (in pc)\ndistance={d_pc_str}\n# Inclination angle of outer thin disk (in degrees)\ntheta=30.\n# Spectrum filename\nspec=spec_01\n'
     with open(os.path.join(riaf_sed_path, 'fortran/in.dat'), "w") as text_file:
         text_file.write(txt)
         
@@ -370,15 +374,25 @@ def get_RIAF_flux(wav, riaf_sed_path, M_BH=1e6, lambda_Edd=1e-4, z=0.01, s=0.3, 
     return M_band, m_band, L_AGN_band.to(u.erg/u.s).value, f_band.to(u.erg/u.s/u.cm**2).value, nuf_nu.to(u.erg/u.s/u.cm**2).value
 
 
-def get_AGN_flux(model_sed, M_BH=1e6, lambda_Edd=0.1, z=0.01, band='SDSS_g'):
+def get_AGN_flux(model_sed, M_BH=1e6, lambda_Edd=0.1, z=0.01, alpha = 0.3, band='SDSS_g'):
     
     bandpass = lib[band]
     # Input redshift
     d_L = cosmo.luminosity_distance(z).to(u.cm)
     d_c = cosmo.comoving_distance(z)
+    
+    # Self-gravity radius (units of R_g)
+    eta = 0.0572 # for spin = 0
+    m9 = M_BH/1e9
+    L_bol = (lambda_Edd*1.26*1e38*M_BH)*u.erg/u.s
+    dotM = (L_bol/(eta*const.c**2)).to(u.Msun/u.yr)
+    dotm = (dotM/(38.8*m9*u.Msun/u.yr)).to(u.dimensionless_unscaled).value
+    r_sg = 2150 * m9**(-2/9) * dotm**(4/9) * alpha**(2/9)
+    log_r_sg = np.clip(np.log10(r_sg), 3, 7) # Falls just slightly below lower bound (2.99451) for IMBHs
+    
     # Parameters
     pars = {'bh_mass':M_BH,'dist_c':d_c.to(u.Mpc).value,'lambda_edd':np.log10(lambda_Edd),
-            'spin':0,'r_cor':100,'log_r_out':-1,'kT_e':0.23,'tau':11,'gamma':2.2,'f_pl':0.05,'z':z,'norm':1}
+            'spin':0,'r_cor':100,'log_r_out':log_r_sg,'kT_e':0.23,'tau':11,'gamma':2.2,'f_pl':0.05,'z':z,'norm':1}
     
     # Get the SED
     model_sed.setPars(list(pars.values()))
