@@ -13,6 +13,7 @@ from scipy.interpolate import interp1d, RegularGridInterpolator, LinearNDInterpo
 from numpy.polynomial.polynomial import polyval2d
 from scipy.integrate import trapz, cumtrapz
 from astropy.io import fits
+from fast_histogram import histogram1d
 
 import matplotlib.pyplot as plt
 from labellines import labelLine, labelLines
@@ -30,6 +31,13 @@ lib = pyphot.get_library()
 
 # https://heasarc.gsfc.nasa.gov/xanadu/xspec/manual/node205.html#optxagnf
 xspec.Xset.allowPrompting = False
+
+def hist1d(x, bins):
+    log_bins = np.log10(bins)
+    log_x = np.log10(x)
+    #return np.histogram(x, bins)
+    h = histogram1d(log_x, bins=len(bins)-1, range=[np.min(log_bins), np.max(log_bins)])
+    return h, bins
 
 def f_host_model(z, M_star, seed=None):
     np.random.seed(seed)
@@ -83,24 +91,37 @@ def k_corr(z, g_minus_r):
     return K
 
 
-def g_minus_r_model(M_stellar, mu, cov, seed=None):
+def g_minus_r_model(M_star, mu, cov, seed=None):
     """
-    This code is super slow.
+    Sample host galaxy colors given stellar mass and 2D Gaussian PDF.
+    Creates a grid of PDFs in stellar mass bins as an efficient approximation
     """
-    np.random.seed(seed)
     
-    x_in = np.log10(M_stellar)
+    
+    x_in = np.log10(M_star)
     
     rv = st.multivariate_normal(mean=mu, cov=cov)
     
     # Sample from the PDF
-    y = np.linspace(-2, 2, 100) # Range
+    y = np.linspace(-2, 2, 100) # Range for colors
+    x_in_grid = np.linspace(4, 12, 20) # Range for stellar mass
     
+    # Create grid of PDFs instead of evaluating at each x_in to speed-up    
     g_minus_r_draws = np.full(len(x_in), np.nan)
-    for i, x_in_i in enumerate(x_in):
-        x = np.full_like(y, x_in_i)
+    pdf_grid = np.zeros([len(x_in_grid), len(y)])
+    for i, x_i in enumerate(x_in_grid):
+        x = np.full_like(y, x_i)
         pdf = rv.pdf(x=np.array([x,y]).T)
-        g_minus_r_draws[i] = np.random.choice(y, size=1, p=pdf/np.sum(pdf))
+        pdf_grid[i] = pdf/np.sum(pdf)
+        #plt.plot(y, pdf_grid[i])
+    
+    # Sample from the PDF in each bin
+    idx_bin = np.digitize(x_in, bins=x_in_grid)
+    # Vectorize np.random.choice
+    # https://stackoverflow.com/questions/47722005/
+    p = pdf_grid[idx_bin]
+    idx_draws = (p.cumsum(1) > np.random.rand(p.shape[0])[:,None]).argmax(1)
+    g_minus_r_draws = y[idx_draws]
             
     # TODO: K-correction
     # This is the galaxy color at ~0.1
@@ -108,7 +129,7 @@ def g_minus_r_model(M_stellar, mu, cov, seed=None):
     # to get new g mag
     
     return g_minus_r_draws
-
+    
 
 def g_minus_r_model_blue(M_stellar, seed=None):    
     mu = np.array([8.9846321,  0.46562084])
@@ -140,20 +161,26 @@ def GSMF_stellar(M_star, z):
     beta = 1.05
     M_star_br = 1e11
     M_BH = 10**(alpha + beta*np.log10(M_star/M_star_br))
-    return _BHMF_stellar(M_BH)
+    return _BHMF_stellar(M_BH) 
 
 
 def _BHMF_stellar(M_BH):
     # Fig. 14 https://arxiv.org/pdf/2110.15607.pdf
     # z=0
     log_M_BH = np.log10(M_BH)
+    #dM = np.diff(M_BH)[0]*u.Msun
+    #dlog_M = np.diff(log_M_BH)[0]
+    # Read the digitized results from Fig. 14 z ~ 0
     dat = np.loadtxt('BHMF_stellar.txt', delimiter=',')
     _log_M_BH = dat[:,0]
-    _dlog_M_BH = np.diff(log_M_BH)[0]
+    #_dlog_M_BH = np.diff(_log_M_BH)[0]
     _log_phi = dat[:,1]
-    # Interpolate
+    # Interpolate to M_BH
     log_phi = interp1d(_log_M_BH, _log_phi, fill_value='extrapolate')
-    return 10**log_phi(log_M_BH)*_dlog_M_BH
+    phi = 10**(log_phi(log_M_BH))*u.Mpc**-3
+    # Convert log M_BH to log M_star
+    #phi = phi * dlog_M_BH / dlog_M_stellar
+    return phi
 
 
 def _GSMF_blue(M_star):
@@ -161,7 +188,8 @@ def _GSMF_blue(M_star):
     M_br = 10**10.72
     phi = 0.71*1e-3
     alpha = -1.45
-    return np.exp(-M_star/M_br)/M_br * phi*(M_star/M_br)**alpha
+    phi = np.exp(-M_star/M_br)/M_br * phi*(M_star/M_br)**alpha
+    return phi
 
 
 def _GSMF_red(M_star):
@@ -171,7 +199,8 @@ def _GSMF_red(M_star):
     phi2 = 0.08*1e-3
     alpha1 = -0.45
     alpha2 = -1.45
-    return np.exp(-M_star/M_br)/M_br * (phi1*(M_star/M_br)**alpha1 + phi2*(M_star/M_br)**alpha2)
+    phi = np.exp(-M_star/M_br)/M_br * (phi1*(M_star/M_br)**alpha1 + phi2*(M_star/M_br)**alpha2)
+    return phi
 
 
 def GSMF(M_star, z):
@@ -285,16 +314,32 @@ def ERDF_red(lambda_Edd, xi=10**-2.13):
     return xi * ((lambda_Edd/lambda_br)**delta1 + (lambda_Edd/lambda_br)**delta2)**-1 # dN / dlog lambda
 
 
-def get_RIAF_flux(wav, riaf_sed_path, M_BH=1e6, lambda_Edd=1e-4, z=0.01, s=0.3, p=0.3, alpha=0.3, band='SDSS_g'):
+def get_RIAF_flux(model_sed, M_BH=1e6, lambda_Edd=1e-4, z=0.01, M_BH_template=4e6, lambda_Edd_template=1e-4, s=0.3, p=2.3,
+                  alpha=0.3, beta=0.9, delta=0.001, gamma=1.5, theta=30, sl0i=2.0, sl0f=3.0, band='SDSS_g'):
     """
     Compute the SED of a radiatively inefficient accretion flow (RIAF) following Nemmen et al. 2006; Nemmen et al. 2014
     https://academic.oup.com/mnras/article/438/4/2804/2907740
     https://github.com/rsnemmen/riaf-sed
     
-    s: power-law index for M(R)
-    p: strength of wind (jet vs. AD strength) 
+    The RIAF SED code doesn't really work, so just use some template parameters as a template and re-scale everything after
+    like L ~ lambda_Edd^2 and L ~ M_BH
     
+    To fit a SED, delta and p make the biggest differences
+    
+    s: power-law index for M(R)
+    p: strength of wind (jet vs. AD strength)
+    alpha: SSD viscosity parameter [do not recommend changing]
+    beta: ratio of gas to total pressure [do not recommend changing]
+    delta: fraction of turbulent dissipation that directly heats electrons
+    gamma: adiabatic index [do not recommend changing]
+    theta: inclination angle [deg]
     """
+    
+    # Vectorization
+    wav, riaf_sed_path = model_sed['wav'], model_sed['dir']
+    
+    # Normalization
+    lambda_Edd = lambda_Edd * 5e6
     
     bandpass = lib[band]
     # Input redshift
@@ -303,51 +348,80 @@ def get_RIAF_flux(wav, riaf_sed_path, M_BH=1e6, lambda_Edd=1e-4, z=0.01, s=0.3, 
     R_s = 2*const.G*M_BH*u.Msun/(const.c**2)
     R_s = R_s.to(u.cm)
     R_g = 1/2*R_s
-    
+        
     # This equation is not valid, because this disk is truncated
     eta = 0.0572 # for spin = 0
-    m9 = M_BH/1e9
-    L_bol = (lambda_Edd*1.26*1e38*M_BH)*u.erg/u.s
+    m9 = M_BH_template/1e9
+    L_bol = (lambda_Edd_template*1.26*1e38*M_BH_template)*u.erg/u.s
     dotM = (L_bol/(eta*const.c**2)).to(u.Msun/u.yr)
     dotm = (dotM/(38.8*m9*u.Msun/u.yr)).to(u.dimensionless_unscaled).value
     r_sg = 2150 * m9**(-2/9) * dotm**(4/9) * alpha**(2/9)
     R_sg = r_sg*R_g
     
+    dotM_Edd = 22*m9*u.Msun/u.yr # 10% radiative efficiency
+    
     Ro = R_sg # outer disk radius = self-gravity radius https://articles.adsabs.harvard.edu/pdf/1989MNRAS.238..897L
     _Ro = Ro/R_s # outer radius in R_s units
         
     # compute the net mass accretion rate into the BH (Yuan et al. 2003)
-    #lambda0 = lambda_Edd * (s + 1) * (Ro - R_s) / (Ro - R_s*(R_s/Ro)**s)
-    lambdao = lambda_Edd * (R_s/Ro)**(-s)
-    dotmo = lambdao # Mass accretion rate at the outer radius R_o of the RIAF
     # should be slightly larger accounting for mass loss from winds
+    dotMo = dotM * (R_s/Ro)**(-s)
+    dotmo = dotMo/dotM_Edd # Mass accretion rate at the outer radius R_o of the RIAF
+    
+    to_fortran = lambda x: '{:.2e}'.format(x).replace('e', 'd')
     
     # Convert to fortran format
-    dotmo_str = '{:.2e}'.format(dotmo).replace('e', 'd')
-    M_BH6_str = '{:.2e}'.format(M_BH/1e6).replace('e', 'd')
-    Ro_str = '{:.2e}'.format(_Ro).replace('e', 'd')
-    d_pc_str = '{:.2e}'.format(d_L.to(u.pc).value).replace('e', 'd')
-    p_str = '{:.2e}'.format(p).replace('e', 'd')
-    alpha_str = '{:.2e}'.format(alpha).replace('e', 'd')
+    dotmo_str = to_fortran(dotmo)
+    M_BH6_str = to_fortran(M_BH_template/1e6)
+    Ro_str = to_fortran(_Ro)
+    d_pc_str = to_fortran(d_L.to(u.pc).value)
+    p_str = to_fortran(p)
+    alpha_str = to_fortran(alpha)
+    beta_str = to_fortran(beta)
+    delta_str = to_fortran(delta)
+    gamma_str = to_fortran(gamma)
+    theta_str = to_fortran(theta)
     
-    print(dotmo_str)
-    print(Ro_str)
+    sl0i_str = to_fortran(sl0i)
+    sl0f_str = to_fortran(sl0f)
+    
+    #print(dotmo_str)
     
     # Insert the parameters in the input file
-    txt = f'# Input parameters for ADAF model\n# ==================================\n#\n# Dynamics\n# ***************************\n# Adiabatic index gamma\ngamai=1.5d0\n# Black hole mass (in 10^6 Solar masses)\nm={M_BH6_str}\n# ratio of gas to total pressure\nbeta=0.9d0\n# alpha viscosity\nalfa={alpha_str}\n# Fraction of turbulent dissipation that directly heats electrons\ndelta=0.2d0\n# Mdot_out (Eddington units)\ndotm0={dotmo_str}\n# R_out (units of R_S)\nrout={Ro_str}\n# p_wind ("strength of wind")\npp0={p_str}\n#\n# Range of eigenvalues of the problem (the "shooting" parameter)\n# Initial and final value, number of models to be computed\nsl0i=1.7\nsl0f=2.5\nnmodels=10\n#\n# Outer boundary conditions (OBCs)\n# T_i (ion temperature) in units of the Virial temperature\nti=0.6\n# T_e (electron temperature) \nte=0.08\n# Mach number=v_R/c_s (radial velocity/sound speed)\nvcs=0.5d0\n#\n# Name of log file\ndiag=out_01\n#\n# SED calculation\n# ***************************\n# distance (in pc)\ndistance={d_pc_str}\n# Inclination angle of outer thin disk (in degrees)\ntheta=30.\n# Spectrum filename\nspec=spec_01\n'
-    with open(os.path.join(riaf_sed_path, 'fortran/in.dat'), "w") as text_file:
-        text_file.write(txt)
-        
-    # Execute the SED computation
-    cwd = os.getcwd()
-    os.chdir(os.path.join(riaf_sed_path, 'fortran'))
-    # Find the global solution
-    command = os.path.join(riaf_sed_path, 'perl/dyn.pl')
-    subprocess.call(command.split())
-    # Generate the spectrum
-    command = os.path.join(riaf_sed_path, 'perl/spectrum.pl')
-    subprocess.call(command.split())
-    os.chdir(cwd)
+    txt = f'# Input parameters for ADAF model\n# ==================================\n#\n# Dynamics\n# ***************************\n# Adiabatic index gamma\ngamai={gamma_str}\n# Black hole mass (in 10^6 Solar masses)\nm={M_BH6_str}\n# ratio of gas to total pressure\nbeta={beta_str}\n# alpha viscosity\nalfa={alpha_str}\n# Fraction of turbulent dissipation that directly heats electrons\ndelta={delta_str}\n# Mdot_out (Eddington units)\ndotm0={dotmo_str}\n# R_out (units of R_S)\nrout={Ro_str}\n# p_wind ("strength of wind")\npp0={p_str}\n#\n# Range of eigenvalues of the problem (the "shooting" parameter)\n# Initial and final value, number of models to be computed\nsl0i={sl0i_str}\nsl0f={sl0f_str}\nnmodels=10\n#\n# Outer boundary conditions (OBCs)\n# T_i (ion temperature) in units of the Virial temperature\nti=0.6\n# T_e (electron temperature) \nte=0.08\n# Mach number=v_R/c_s (radial velocity/sound speed)\nvcs=0.9d0\n#\n# Name of log file\ndiag=out_01\n#\n# SED calculation\n# ***************************\n# distance (in pc)\ndistance={d_pc_str}\n# Inclination angle of outer thin disk (in degrees)\ntheta={theta_str}\n# Spectrum filename\nspec=spec_01\n'
+    
+    run = True
+    # If the input file exists already and has the same parameters, skip running
+    if os.path.exists(os.path.join(riaf_sed_path, 'fortran/in.dat')):
+        with open(os.path.join(riaf_sed_path, 'fortran/in.dat'), 'r') as text_file:
+            txt_old = text_file.read()
+            if txt_old == txt:
+                with open(os.path.join(riaf_sed_path, 'fortran/out_01'), 'r') as out_file:
+                    dat_out = out_file.read()
+                    if 'Run finished' in dat_out:
+                        print('Re-using previous run.')
+                        run = False
+                    
+    if run:
+        with open(os.path.join(riaf_sed_path, 'fortran/in.dat'), 'w') as text_file:
+            text_file.write(txt)
+
+        # Execute the SED computation
+        cwd = os.getcwd()
+        os.chdir(os.path.join(riaf_sed_path, 'fortran'))
+        # Find the global solution
+        command = os.path.join(riaf_sed_path, 'perl/dyn.pl')
+        subprocess.call(command.split())
+        # Generate the spectrum
+        command = os.path.join(riaf_sed_path, 'perl/spectrum.pl')
+        subprocess.call(command.split())
+        os.chdir(cwd)
+    
+    # Make sure the model ran succesfully
+    with open(os.path.join(riaf_sed_path, 'fortran/out_01'), 'r') as out_file:
+        dat_out = out_file.read()
+        if not 'Run finished' in dat_out:
+            raise ValueError('RIAF-SED failed to find a solution.')
     
     # Open the spectrum file
     dat = np.loadtxt(os.path.join(riaf_sed_path, 'fortran/spec_01'))
@@ -355,8 +429,20 @@ def get_RIAF_flux(wav, riaf_sed_path, M_BH=1e6, lambda_Edd=1e-4, z=0.01, s=0.3, 
     nu = 10**dat[:,0]*u.Hz
     wav_sed = np.flip(nu.to(u.nm, equivalencies=u.spectral())*(1 + z))
     
+    # Disk temperature correction (this is almost certaintly wrong)
+    # See Done et al. 2012
+    T_M = (M_BH/M_BH_template)**(-1/4)
+    T_l = (lambda_Edd/lambda_Edd_template)**(1/4)
+    # Wein's law lambda ~ 1/T
+    wav_sed = wav_sed/T_M
+    wav_sed = wav_sed/T_l
+    
     sed = 10**dat[:,1]*u.erg/u.s/(4*np.pi*d_L**2)
     nuf_nu = np.flip(sed.to(u.erg/u.cm**2/u.s))
+    
+    # Re-scale SED
+    nuf_nu = nuf_nu*(lambda_Edd/lambda_Edd_template)
+    nuf_nu = nuf_nu*(M_BH/M_BH_template)
     
     # Get L_band
     f_lambda = nuf_nu/wav_sed
@@ -374,7 +460,7 @@ def get_RIAF_flux(wav, riaf_sed_path, M_BH=1e6, lambda_Edd=1e-4, z=0.01, s=0.3, 
     return M_band, m_band, L_AGN_band.to(u.erg/u.s).value, f_band.to(u.erg/u.s/u.cm**2).value, nuf_nu.to(u.erg/u.s/u.cm**2).value
 
 
-def get_AGN_flux(model_sed, M_BH=1e6, lambda_Edd=0.1, z=0.01, alpha = 0.3, band='SDSS_g'):
+def get_AGN_flux(model_sed, M_BH=1e6, lambda_Edd=0.1, z=0.01, spin=0, r_corr=100, alpha=0.3, kT_e=0.23, tau=11, gamma=2.2, f_pl=0.05, band='SDSS_g'):
     
     bandpass = lib[band]
     # Input redshift
@@ -392,7 +478,8 @@ def get_AGN_flux(model_sed, M_BH=1e6, lambda_Edd=0.1, z=0.01, alpha = 0.3, band=
     
     # Parameters
     pars = {'bh_mass':M_BH,'dist_c':d_c.to(u.Mpc).value,'lambda_edd':np.log10(lambda_Edd),
-            'spin':0,'r_cor':100,'log_r_out':log_r_sg,'kT_e':0.23,'tau':11,'gamma':2.2,'f_pl':0.05,'z':z,'norm':1}
+            'spin':spin,'r_cor':r_corr,'log_r_out':log_r_sg,'kT_e':kT_e,'tau':tau,
+            'gamma':gamma,'f_pl':f_pl,'z':z,'norm':1}
     
     # Get the SED
     model_sed.setPars(list(pars.values()))
@@ -421,7 +508,7 @@ def get_AGN_flux(model_sed, M_BH=1e6, lambda_Edd=0.1, z=0.01, alpha = 0.3, band=
     #L_bol_Shen = lambda_Edd*1.26e38*(M_BH.to(u.Msun).value)*u.erg/u.s
     #L_bol = np.trapz(L_lambda.to(u.erg/u.s/u.AA), x=wav.to(u.AA)).to(u.erg/u.s)
         
-    return M_band, m_band, L_AGN_band.to(u.erg/u.s).value, f_band.to(u.erg/u.s/u.cm**2).value, nuf_nu.to(u.erg/u.s/u.cm**2).value
+    return M_band, m_band, L_AGN_band.to(u.erg/u.s).value, f_band.to(u.erg/u.s/u.cm**2).value, nuf_nu.to(u.erg/u.s/u.cm**2).value    
 
 
 def lambda_obs(L_bol, seed=None, randomize=True):
@@ -534,7 +621,7 @@ def inv_transform_sampling(y, x, n_samples=1000, survival=False):
     inv_cdf = interp1d(cum_values, x, fill_value='extrapolate')
     if survival:
         n_samples = int(survival)
-        print(n_samples)
+        #print(n_samples)
     r = np.random.rand(n_samples)
     return inv_cdf(r)
 
@@ -559,7 +646,7 @@ class DemographicModel:
         
 
     def sample(self, nbins=10, nbootstrap=50, eta=1e4, zmax=0.1, ndraw_dim=1e7, omega=4*np.pi,
-               seed_dict={'dc':(lambda x: np.ones_like(x)), 'popIII':f_occ_Bellovary19},
+               seed_dict={'dc':(lambda x: np.ones_like(x)), 'popIII':f_occ_Bellovary19, 'dc_stellar':(lambda x: np.ones_like(x))},
                ERDF_mode=0, log_edd_mu=-1, log_edd_sigma=0.2):
 
         """
@@ -568,9 +655,11 @@ class DemographicModel:
         nbins: Number of stellar mass bins 
         nbootstrap: Number of bootstrap samples (for observational uncertainties)
         eta: Understamping factor (each MC data point corresponds to eta real galaxies)
-        zmax:
-        ndraw_dim: 
+        zmax: Maximum redshift range
+        ndraw_dim: Dimensions for arrays (should be larger than number of simulated galaxies)
         occ_dict: Dictonary of occupation fractions to use
+            name: occupation function
+            *_stellar: If _stellar key, it's a special function that uses the stellar BHMF from Sicilia et al. 2021 + specified occupation function
         ERDF_mode: Which ERDF to adopt
             0 = Weigel 2017
             1 = active fraction
@@ -588,11 +677,14 @@ class DemographicModel:
         pars['log_lambda_min'] = -8.0 # -8
         pars['log_lambda_max'] = 1.0
         
-        pars['log_M_star_min'] = 4.5
+        pars['log_M_star_min'] = 5.5 #4.5
         pars['log_M_star_max'] = 12
         
         pars['log_M_BH_min'] = 1.5
         pars['log_M_BH_max'] = 9.5
+        
+        print('Omega:', omega)
+        print('eta:', eta)
         
         if zmax > 0.25:
             # M_BH - M_star relation from Dong 2020
@@ -613,8 +705,11 @@ class DemographicModel:
         M_star_ = np.logspace(pars['log_M_star_min'], pars['log_M_star_max'], nbins+1, dtype=dtype)*u.Msun
         dM_star = np.diff(M_star_)
         dlogM_star = np.diff(np.log10(M_star_.value))
-        pars['M_star'] = M_star_[1:] + dM_star/2 # bins
+        M_star = M_star_[1:] + dM_star/2 # bins
+        pars['M_star'] = M_star
         pars['M_star_'] = M_star_
+        
+        print('log M_star bins: ', np.around(np.log10(pars['M_star'].value), 2))
 
         # 1. Assign number of draws
         d_c_min = 0.5*u.Mpc
@@ -635,6 +730,8 @@ class DemographicModel:
         dM_BH = np.diff(M_BH_)
         dlogM_BH = np.diff(np.log10(M_BH_.value))
         pars['M_BH'] = M_BH_[1:] + dM_BH/2 # bins
+        
+        print('log M_BH bins: ', np.around(np.log10(pars['M_BH'].value), 2))
 
         samples['z_draw'] = np.full([nbootstrap, ndraw_dim], np.nan, dtype=dtype)
 
@@ -676,27 +773,44 @@ class DemographicModel:
             # z \propto dV(z)
             z_draw = inv_transform_sampling(cosmo.differential_comoving_volume(z_bins).value, z_samples, n_samples=ndraw_dim)
             
-            # 2. Draw from GSMF
-            phidM_blue = GSMF_blue(pars['M_star'].value, z_draw)*dM_star
-            phidM_red = GSMF_red(pars['M_star'].value, z_draw)*dM_star
-            phidM_stellar = GSMF_stellar(pars['M_star'].value, z_draw)*dM_star
+            # 2. Draw from GSMF [Mpc^-3]
+            phidM_blue = GSMF_blue(M_star.value, z_draw)*dM_star
+            phidM_red = GSMF_red(M_star.value, z_draw)*dM_star
+            phidM_stellar = GSMF_stellar(M_star.value, z_draw) #*dM_star
             
-            # phi = dN / dlog M
+            # Convert log M_BH to log M_star
+            phidM_stellar = phidM_stellar * dlogM_BH / dlogM_star
+            
+            print('dMstar', dM_star)
+            
+            """
+            plt.loglog(pars['M_star'].value, (GSMF_stellar(pars['M_star'].value, z_draw)*dM_star).value/dlogM_star * dlogM_BH / dlogM_star, color='b')
+            plt.loglog(pars['M_star'].value, (GSMF_stellar(pars['M_star'].value, z_draw)).value/dlogM_star * dlogM_BH / dlogM_star, color='r')
+            plt.loglog(pars['M_star'].value, (phidM_red).value/dlogM_star)
+            plt.loglog(pars['M_star'].value, (phidM_blue).value/dlogM_star)
+            plt.ylim(1e-8, 1e8)
+            plt.show()
+            """
+            
+            # phi = dn / dlog M  = dN / dV / dlog M
             # Normalize
             Vred = V.to(u.Mpc**3).value / eta # Reduced volume
-            sf_blue = Vred * trapz((phidM_blue/dM_star).value, pars['M_star'].value)
-            sf_red = Vred * trapz((phidM_red/dM_star).value, pars['M_star'].value)
-            sf_stellar = Vred * trapz((phidM_stellar/dM_star).value, pars['M_star'].value)
+            sf_blue = Vred * trapz((phidM_blue/dM_star).value, M_star.value)
+            sf_red = Vred * trapz((phidM_red/dM_star).value, M_star.value)
+            sf_stellar = Vred * trapz((phidM_stellar/dM_star).value, M_star.value)
             
             M_star_draw_blue = inv_transform_sampling((phidM_blue/dM_star).value, M_star_.value, survival=sf_blue)*u.Msun
             M_star_draw_red = inv_transform_sampling((phidM_red/dM_star).value, M_star_.value, survival=sf_red)*u.Msun
-            M_star_draw_stellar = inv_transform_sampling((phidM_stellar/dM_star).value, M_star_.value, survival=sf_red)*u.Msun
+            M_star_draw_stellar = inv_transform_sampling((phidM_stellar/dM_star).value, M_star_.value, survival=sf_stellar)*u.Msun
+            
             # Red + blue population
-            #M_star_draw = np.concatenate([M_star_draw_blue, M_star_draw_red])
+            # M_star_draw = np.concatenate([M_star_draw_blue, M_star_draw_red])
             # Red + blue + stellar population
             M_star_draw = np.concatenate([M_star_draw_stellar, M_star_draw_blue, M_star_draw_red])
             
             #mask_red = np.concatenate([np.full(len(M_star_draw_blue), False), np.full(len(M_star_draw_red), True)])
+            print('log N galaxies: ', np.around(np.log10(len(M_star_draw)), 2))
+            print(np.around(np.log10(len(M_star_draw_stellar)), 2), np.around(np.log10(len(M_star_draw_blue)), 2), np.around(np.log10(len(M_star_draw_red)), 2))
             
             mask_stellar = np.concatenate([np.full(len(M_star_draw_stellar), True),
                                            np.full(len(M_star_draw_blue), False),
@@ -708,32 +822,44 @@ class DemographicModel:
                                         np.full(len(M_star_draw_blue), True),
                                         np.full(len(M_star_draw_red), False)])
             
-            
             #ndraw = len(M_star_draw_blue) + len(M_star_draw_red)
             ndraw = len(M_star_draw_stellar) + len(M_star_draw_blue) + len(M_star_draw_red)
             
-            print(np.shape(samples['pop'][j,:ndraw]))
-            print(np.shape(samples['pop'][j,:ndraw][mask_stellar]))
-            samples['pop'][j,:ndraw][mask_stellar] = np.full_like(mask_stellar, 2)
-            samples['pop'][j,:ndraw][mask_red] = 1
-            samples['pop'][j,:ndraw][mask_blue] = 0
+            # Shuffle
+            p = np.random.permutation(ndraw)
+            M_star_draw = M_star_draw[p]
+            mask_stellar = mask_stellar[p]
+            mask_red = mask_red[p]
+            mask_blue = mask_blue[p]
             
             if ndraw > ndraw_dim:
-                print("Warning: ndraw_dim is too small.")
+                print("ndraw > ndraw_dim! Try increasing ndraw_dim.")
+                print('ndraw: ', ndraw)
+                print('ndraw_dim: ', ndraw_dim)
                 ndraw = ndraw_dim
                 M_star_draw = M_star_draw[:ndraw]
+                mask_stellar = mask_stellar[:ndraw]
+                mask_red = mask_red[:ndraw]
+                mask_blue = mask_blue[:ndraw]
+                
+            # Mask galaxy populations
+            samples['pop'][j,:ndraw][mask_stellar] = 2
+            samples['pop'][j,:ndraw][mask_red] = 1
+            samples['pop'][j,:ndraw][mask_blue] = 0
                         
             samples['ndraws'][j] = ndraw
             samples['z_draw'][j,:ndraw] = z_draw[:ndraw]
             samples['M_star_draw'][j,:ndraw] = M_star_draw
-            samples['n_i_M'][j,:], _ = np.histogram(M_star_draw, bins=M_star_)
+            samples['n_i_M'][j,:], _ = hist1d(M_star_draw.value[~mask_stellar], bins=M_star_.value)
+            
+            print('Sampling host galaxy colors')
 
             # Host galaxy colors 
             g_minus_r_draw = np.full(ndraw, np.nan)
-            g_minus_r_draw[mask_red] = g_minus_r_model_red(M_star_draw_red.value, seed=j)
-            g_minus_r_draw[mask_blue] = g_minus_r_model_blue(M_star_draw_blue.value, seed=j)
-            ## Assume blue colors
-            g_minus_r_draw[mask_stellar] = g_minus_r_model_blue(M_star_draw_stellar.value, seed=j)
+            g_minus_r_draw[mask_red] = g_minus_r_model_red(M_star_draw[mask_red].value, seed=j)
+            g_minus_r_draw[mask_blue] = g_minus_r_model_blue(M_star_draw[mask_blue].value, seed=j)
+            ## Assume blue colors for stellar channels
+            g_minus_r_draw[mask_stellar] = g_minus_r_model_blue(M_star_draw[mask_stellar].value, seed=j)
             samples['g-r'][j,:ndraw] = g_minus_r_draw
             
             # 4. BH Mass Function
@@ -741,13 +867,15 @@ class DemographicModel:
                              np.random.normal(0.0, 0.55, size=ndraw))*M_BH_norm
             samples['M_BH_draw'][j,:ndraw] = M_BH_draw
             
+            print('Sampling ERDF')
+            
             # 5. Eddington ratio Function
             if ERDF_mode == 0:
                 lambda_draw = np.full(ndraw, np.nan)
                 # Blue  
                 xi_blue = ERDF_blue(pars['lambda_Edd']) # dN / dlog lambda
                 xi_red = ERDF_red(pars['lambda_Edd']) # dN / dlog lambda
-                xi_stellar = ERDF_red(pars['lambda_Edd'])
+                xi_stellar = ERDF_red(pars['lambda_Edd']) # Assume these are radiatively inefficient ERDF
                 norm = trapz(xi_blue + xi_red + xi_stellar, pars['lambda_Edd'])
                 xi_blue = xi_blue/norm
                 xi_red = xi_red/norm
@@ -763,20 +891,30 @@ class DemographicModel:
                 lambda_draw = survival_sampling(lambda_draw_init, survival=p, fill_value=1e-8)
 
             samples['lambda_draw'][j,:ndraw] = lambda_draw
-            samples['n_i_Edd'][j,:], _ = np.histogram(lambda_draw, bins=lambda_)
+            samples['n_i_Edd'][j,:], _ = hist1d(lambda_draw, bins=lambda_)
+            
+            print('Sampling occupation probability')
             
             # Occupation probabililty survival sampling
-            # Don't include stellar mass "galaxies"
             for k, seed in enumerate(seed_dict.keys()):
-                p = seed_dict[f'{seed}'](M_star_draw.value)
-                M_BH_draw_seed = survival_sampling(M_BH_draw.value, survival=p, fill_value=0.0)*u.Msun
-                samples[f'M_BH_draw_{seed}'][j,:ndraw] = M_BH_draw_seed
-                samples[f'n_i_M_{seed}'][j,:], _ = np.histogram(M_BH_draw_seed, bins=M_BH_)
+                
+                # Mask artificial stellar BHMF "host galaxies" unless "*_stellar" in key
+                if '_stellar' in seed.lower():
+                    mask_seed = mask_stellar | mask_blue | mask_red
+                else:
+                    mask_seed = ~mask_stellar
+                
+                p = seed_dict[f'{seed}'](M_star_draw.value[mask_seed])
+                M_BH_draw_seed = survival_sampling(M_BH_draw.value[mask_seed], survival=p, fill_value=0.0)*u.Msun
+                samples[f'M_BH_draw_{seed}'][j,:ndraw][mask_seed] = M_BH_draw_seed
+                samples[f'n_i_M_{seed}'][j,:], _ = hist1d(M_BH_draw_seed.value, bins=M_BH_.value)
+                
+                print('log N BHs: ', np.around(np.log10(len(M_BH_draw_seed)), 2))
 
                 # 6. AGN Luminosity Function
-                L_draw_seed = lambda_draw * 1.26e38 * M_BH_draw_seed.to(u.Msun).value * u.erg/u.s
-                samples[f'L_draw_{seed}'][j,:ndraw] = L_draw_seed
-                samples[f'n_i_L_{seed}'][j,:], _ = np.histogram(L_draw_seed, bins=L_)
+                L_draw_seed = lambda_draw[mask_seed] * 1.26e38 * M_BH_draw_seed.to(u.Msun).value * u.erg/u.s
+                samples[f'L_draw_{seed}'][j,:ndraw][mask_seed] = L_draw_seed
+                samples[f'n_i_L_{seed}'][j,:], _ = hist1d(L_draw_seed.value, bins=L_.value)
 
         # Correct for numerical factor and save the results
         ndraw_dim = int(np.max(samples['ndraws']))
@@ -815,9 +953,16 @@ class DemographicModel:
         xspec.AllModels.setEnergies(f"{e0.value} {e1.value} 1000 log")
         model_sed = xspec.Model(model_sed_name)
         
+        energies = model_sed.energies(0)[::-1]*u.keV # Why N-1?
+        wav_RF = (energies[:-1]).to(u.nm, equivalencies=u.spectral())
+        
+        model_sed_riaf = {'wav':wav_RF.to(u.nm).value, 'dir':'/home/colinjb2/riaf-sed'}
+        
         # Initalize the grid
-        x = np.logspace(2, 9, nbins) # hard-code this because the SEDs are not well-defined outside this range
-        y = np.logspace(pars['log_lambda_min'], pars['log_lambda_max'], nbins)
+        # hard-coding some things to avoid boundary conditinos in the SEDs
+        x = np.logspace(2, 9, nbins)
+        y_agn = np.logspace(-3, 0, 3)
+        y_riaf = np.logspace(-8, -3, 5)
         z = np.linspace(s['zmin'], s['zmax'], nbins)
         
         print(f'Creating SED grid in band {band}')
@@ -828,11 +973,24 @@ class DemographicModel:
             # Get AGN luminosity in band and M_i(z=2)
             vget_AGN_flux = np.vectorize(get_AGN_flux, otypes=[np.float,np.float,np.float,np.float,np.ndarray])
 
-            X, Y, Z = np.meshgrid(x, y, z, indexing='ij', sparse=True)
-            _, _, L_band_model, _, nuf_nu = vget_AGN_flux(model_sed, M_BH=X, lambda_Edd=Y, z=Z, band=band)
+            X, Y, Z = np.meshgrid(x, y_agn, z, indexing='ij', sparse=True)
+            _, _, L_band_model_AGN, _, nuf_nu_AGN = vget_AGN_flux(model_sed, M_BH=X, lambda_Edd=Y, z=Z, band=band)
 
-            X, Y = np.meshgrid(x, y, indexing='ij', sparse=True)
-            M_i_model, _, _, _, _ = vget_AGN_flux(model_sed, M_BH=X, lambda_Edd=Y, z=2.0, band='SDSS_i')
+            X, Y = np.meshgrid(x, y_agn, indexing='ij', sparse=True)
+            M_i_model_AGN, _, _, _, _ = vget_AGN_flux(model_sed, M_BH=X, lambda_Edd=Y, z=2.0, band='SDSS_i')
+            
+            # Get RIAF luminosity in band and M_i(z=2)
+            vget_RIAF_flux = np.vectorize(get_RIAF_flux, otypes=[np.float,np.float,np.float,np.float,np.ndarray])
+
+            X, Y, Z = np.meshgrid(x, y_riaf, z, indexing='ij', sparse=True)
+            _, _, L_band_model_RIAF, _, nuf_nu_RIAF = vget_RIAF_flux(model_sed_riaf, M_BH=X, lambda_Edd=Y, z=Z, band=band)
+
+            X, Y = np.meshgrid(x, y_riaf, indexing='ij', sparse=True)
+            M_i_model_RIAF, _, _, _, _ = vget_RIAF_flux(model_sed_riaf, M_BH=X, lambda_Edd=Y, z=2.0, band='SDSS_i')
+            
+            L_band_model = np.concatenate([L_band_model_AGN, L_band_model_RIAF])
+            M_i_model = np.concatenate([M_i_model_AGN, M_i_model_RIAF])
+            y = np.concatenate([y_agn, y_riaf])
                 
         self.samples[f'L_{band}_model'] = L_band_model*u.erg/u.s # Shape NxNxN
         self.samples['M_i_model'] = M_i_model # Shape NxNxN
@@ -1063,7 +1221,7 @@ class DemographicModel:
             return DemographicModel()
             
         
-    def plot(self, figsize=(3*6*0.9, 2*5*0.9), seed_colors=['b','m'], seed_markers=['s','o'], moct=np.nanmean, n_bin_min=10):
+    def plot(self, figsize=(3*6*0.9, 2*5*0.9), seed_colors=['b','m','g'], seed_markers=['s','o','^'], moct=np.nanmean, n_bin_min=10):
     
         import matplotlib.ticker as ticker
 
@@ -1099,16 +1257,16 @@ class DemographicModel:
         dlogL = np.diff(np.log10(L.value))[0]
                 
         # phi dM / dlogM
-        axs[0].fill_between(M_star, np.nanpercentile(n_i_M, 16, axis=0)/dlogM_star/V,
-                            np.nanpercentile(n_i_M, 84, axis=0)/dlogM_star/V, color='k', alpha=0.5)
-        axs[0].scatter(M_star, moct(n_i_M, axis=0)/dlogM_star/V, lw=3, color='k')
+        axs[0].fill_between(M_star.value, (np.nanpercentile(n_i_M, 16, axis=0)/dlogM_star/V).value,
+                            (np.nanpercentile(n_i_M, 84, axis=0)/dlogM_star/V).value, color='k', alpha=0.5)
+        axs[0].scatter(M_star.value, moct(n_i_M, axis=0)/dlogM_star/V, lw=3, color='k')
 
         axs[0].set_xscale('log')
         axs[0].set_yscale('log')
         axs[0].set_xlabel(r'$M_{\star}\ (M_{\odot})$', fontsize=18)
         axs[0].set_ylabel(r'$\phi(M_{\star})$ (dex$^{-1}$ Mpc$^{-3}$)', fontsize=18)
-        axs[0].set_xlim([1e5, 4e11])
-        axs[0].set_ylim([1e-4, 1e0])
+        axs[0].set_xlim([1e6, 4e11])
+        #axs[0].set_ylim([1e-4, 1e0])
 
         # Real data
         # https://ui.adsabs.harvard.edu/abs/2012MNRAS.421..621B
@@ -1127,34 +1285,34 @@ class DemographicModel:
             for j in range(nbootstrap):
                 f[j,:] = pars['seed_dict'][f'{seed}'](M_star.value)
                 
-            axs[1].fill_between(M_star, np.percentile(f, 16, axis=0), np.percentile(f, 84, axis=0),
+            axs[1].fill_between(M_star.value, np.percentile(f, 16, axis=0), np.percentile(f, 84, axis=0),
                                 color=seed_colors[k], alpha=0.5)
             axs[1].scatter(M_star, moct(f, axis=0), lw=3, color=seed_colors[k], marker=seed_markers[k])
         
         axs[1].set_xlabel(r'$M_{\star}\ (M_{\odot})$', fontsize=18)
         axs[1].set_ylabel(r'$\lambda_{\rm{occ}}$', fontsize=18)
         axs[1].set_xscale('log')
-        axs[1].set_xlim([1e5, 4e11])
+        axs[1].set_xlim([1e6, 4e11])
         axs[1].set_ylim([0, 1.1])
-
+        
         # M_BH - M_star
         bin_med, _, _ = st.binned_statistic(M_star_draw.flatten(), M_BH_draw.flatten(), np.nanmedian, bins=M_star_)
         bin_hi, _, _ = st.binned_statistic(M_star_draw.flatten(), M_BH_draw.flatten(), lambda x: np.nanpercentile(x, 84), bins=M_star_)
         bin_lo, _, _ = st.binned_statistic(M_star_draw.flatten(), M_BH_draw.flatten(), lambda x: np.nanpercentile(x, 16), bins=M_star_)
-
+        
         axs[2].scatter(M_star, bin_med, lw=3, color='k')
-        axs[2].fill_between(M_star, bin_hi, bin_lo, color='k', alpha=0.5)
+        axs[2].fill_between(M_star.value, bin_hi, bin_lo, color='k', alpha=0.5)
         axs[2].set_xscale('log')
         axs[2].set_yscale('log')
         axs[2].set_xlim([1e6, 1e11])
         axs[2].set_ylim([1e2, 1e8])
         axs[2].set_ylabel(r'$M_{\rm{BH}}\ (M_{\odot})$', fontsize=18)
         axs[2].set_xlabel(r'$M_{\rm{\star}}\ (M_{\odot})$', fontsize=18)
-
+        
         # BH mass function
         for k, seed in enumerate(pars['seed_dict']):
-            axs[3].fill_between(M_BH, np.nanpercentile(samples[f'n_i_M_{seed}'][:,:ndraw_dim], 16, axis=0)/dlogM_BH/V,
-                                np.nanpercentile(samples[f'n_i_M_{seed}'][:,:ndraw_dim], 84, axis=0)/dlogM_BH/V, color=seed_colors[k], alpha=0.5)
+            axs[3].fill_between(M_BH.value, (np.nanpercentile(samples[f'n_i_M_{seed}'][:,:ndraw_dim], 16, axis=0)/dlogM_BH/V).value,
+                                (np.nanpercentile(samples[f'n_i_M_{seed}'][:,:ndraw_dim], 84, axis=0)/dlogM_BH/V).value, color=seed_colors[k], alpha=0.5)
             axs[3].scatter(M_BH, moct(samples[f'n_i_M_{seed}'][:,:ndraw_dim], axis=0)/dlogM_BH/V,
                            lw=3, color=seed_colors[k], marker=seed_markers[k])
 
@@ -1163,19 +1321,19 @@ class DemographicModel:
         axs[3].set_xscale('log')
         axs[3].set_yscale('log')
         axs[3].set_xlim([1e2, 1e8])
-        axs[3].set_ylim([1e-4, 1e0])
+        axs[3].set_ylim([1e-3, 1e4])
 
         # 5. Eddington ratio distribution (ERDF) function
         norm = np.nansum(moct(n_i_Edd, axis=0)*dloglambda)
         axs[4].scatter(lambda_Edd, moct(n_i_Edd, axis=0)/dloglambda/norm, lw=3, color='k')
-        axs[4].fill_between(lambda_Edd, np.nanpercentile(n_i_Edd, 16, axis=0)/dloglambda/norm,
-                            np.nanpercentile(n_i_Edd, 84, axis=0)/dloglambda/norm, color='k', alpha=0.5)
+        axs[4].fill_between(lambda_Edd, (np.nanpercentile(n_i_Edd, 16, axis=0)/dloglambda/norm),
+                            (np.nanpercentile(n_i_Edd, 84, axis=0)/dloglambda/norm), color='k', alpha=0.5)
 
         axs[4].set_xlabel(r'$\lambda_{\rm{Edd}}$', fontsize=18)
         axs[4].set_ylabel(r'$\xi$ (dex$^{-1}$)', fontsize=18)
         axs[4].set_xscale('log')
         axs[4].set_yscale('log')
-        axs[4].set_xlim([5e-8, 1e1])
+        axs[4].set_xlim([5e-8, 1e0])
         axs[4].set_ylim([1e-4, 1e1])
         
         # 6. AGN Luminosity Function
@@ -1188,8 +1346,8 @@ class DemographicModel:
             
             axs[5].scatter(L[mask_L], moct(n_i_L, axis=0)[mask_L]/dlogL/V,
                            lw=3, color=seed_colors[k], marker=seed_markers[k])
-            axs[5].fill_between(L[mask_L], np.nanpercentile(n_i_L, 16, axis=0)[mask_L]/dlogL/V,
-                            np.nanpercentile(n_i_L, 84, axis=0)[mask_L]/dlogL/V,
+            axs[5].fill_between(L[mask_L].value, (np.nanpercentile(n_i_L, 16, axis=0)[mask_L]/dlogL/V).value,
+                                (np.nanpercentile(n_i_L, 84, axis=0)[mask_L]/dlogL/V).value,
                                 color=seed_colors[k], alpha=0.5)
         
         # Real data
