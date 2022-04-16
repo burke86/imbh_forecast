@@ -95,6 +95,9 @@ def g_minus_r_model(M_star, mu, cov, seed=None):
     """
     Sample host galaxy colors given stellar mass and 2D Gaussian PDF.
     Creates a grid of PDFs in stellar mass bins as an efficient approximation
+    
+    https://jakevdp.github.io/PythonDataScienceHandbook/05.12-gaussian-mixtures.html
+
     """
     
     
@@ -335,6 +338,8 @@ def get_RIAF_flux(model_sed, M_BH=1e6, lambda_Edd=1e-4, z=0.01, M_BH_template=4e
     theta: inclination angle [deg]
     """
     
+    # TODO: Add z template and put M, lambda into par filename
+    
     # Vectorization
     wav, riaf_sed_path = model_sed['wav'], model_sed['dir']
     
@@ -348,7 +353,7 @@ def get_RIAF_flux(model_sed, M_BH=1e6, lambda_Edd=1e-4, z=0.01, M_BH_template=4e
     R_s = 2*const.G*M_BH*u.Msun/(const.c**2)
     R_s = R_s.to(u.cm)
     R_g = 1/2*R_s
-        
+    
     # This equation is not valid, because this disk is truncated
     eta = 0.0572 # for spin = 0
     m9 = M_BH_template/1e9
@@ -388,7 +393,10 @@ def get_RIAF_flux(model_sed, M_BH=1e6, lambda_Edd=1e-4, z=0.01, M_BH_template=4e
     #print(dotmo_str)
     
     # Insert the parameters in the input file
-    txt = f'# Input parameters for ADAF model\n# ==================================\n#\n# Dynamics\n# ***************************\n# Adiabatic index gamma\ngamai={gamma_str}\n# Black hole mass (in 10^6 Solar masses)\nm={M_BH6_str}\n# ratio of gas to total pressure\nbeta={beta_str}\n# alpha viscosity\nalfa={alpha_str}\n# Fraction of turbulent dissipation that directly heats electrons\ndelta={delta_str}\n# Mdot_out (Eddington units)\ndotm0={dotmo_str}\n# R_out (units of R_S)\nrout={Ro_str}\n# p_wind ("strength of wind")\npp0={p_str}\n#\n# Range of eigenvalues of the problem (the "shooting" parameter)\n# Initial and final value, number of models to be computed\nsl0i={sl0i_str}\nsl0f={sl0f_str}\nnmodels=10\n#\n# Outer boundary conditions (OBCs)\n# T_i (ion temperature) in units of the Virial temperature\nti=0.6\n# T_e (electron temperature) \nte=0.08\n# Mach number=v_R/c_s (radial velocity/sound speed)\nvcs=0.9d0\n#\n# Name of log file\ndiag=out_01\n#\n# SED calculation\n# ***************************\n# distance (in pc)\ndistance={d_pc_str}\n# Inclination angle of outer thin disk (in degrees)\ntheta={theta_str}\n# Spectrum filename\nspec=spec_01\n'
+    txt = f'# Input parameters for ADAF model\n# ==================================\n#\n# Dynamics\n# ***************************\n# Adiabatic index gamma\ngamai={gamma_str}\n# Black hole mass (in 10^6 Solar masses)\nm={M_BH6_str}\n# ratio of gas to total pressure\nbeta={beta_str}\n# alpha viscosity\nalfa={alpha_str}\n# Fraction of turbulent dissipation that directly heats electrons\ndelta={delta_str}\n# Mdot_out (Eddington units)\ndotm0={dotmo_str}\n# R_out (units of R_S)\nrout={Ro_str}\n# p_wind ("strength of wind")\npp0={p_str}\n#\n# Range of eigenvalues of the problem (the "shooting" parameter)\n# Initial and final value, number of models to be computed\nsl0i={sl0i_str}\nsl0f={sl0f_str}\nnmodels=10\n#\n# Outer boundary conditions (OBCs)\n# T_i (ion temperature) in units of the Virial temperature\nti=0.6\n# T_e (electron temperature) \nte=0.08\n# Mach number=v_R/c_s (radial velocity/sound speed)\nvcs=0.9d0\n#\n# Name of log file\ndiag=out_{M_BH6_str}_{dotmo_str}\n#\n# SED calculation\n# ***************************\n# distance (in pc)\ndistance={d_pc_str}\n# Inclination angle of outer thin disk (in degrees)\ntheta={theta_str}\n# Spectrum filename\nspec=spec_{M_BH6_str}_{dotmo_str}\n'
+    
+    out_filename = f'fortran/out_{M_BH6_str}_{dotmo_str}'
+    spec_filename = f'fortran/spec_{M_BH6_str}_{dotmo_str}'
     
     run = True
     # If the input file exists already and has the same parameters, skip running
@@ -396,7 +404,7 @@ def get_RIAF_flux(model_sed, M_BH=1e6, lambda_Edd=1e-4, z=0.01, M_BH_template=4e
         with open(os.path.join(riaf_sed_path, 'fortran/in.dat'), 'r') as text_file:
             txt_old = text_file.read()
             if txt_old == txt:
-                with open(os.path.join(riaf_sed_path, 'fortran/out_01'), 'r') as out_file:
+                with open(os.path.join(riaf_sed_path, out_filename), 'r') as out_file:
                     dat_out = out_file.read()
                     if 'Run finished' in dat_out:
                         print('Re-using previous run.')
@@ -418,13 +426,13 @@ def get_RIAF_flux(model_sed, M_BH=1e6, lambda_Edd=1e-4, z=0.01, M_BH_template=4e
         os.chdir(cwd)
     
     # Make sure the model ran succesfully
-    with open(os.path.join(riaf_sed_path, 'fortran/out_01'), 'r') as out_file:
+    with open(os.path.join(riaf_sed_path, out_filename), 'r') as out_file:
         dat_out = out_file.read()
         if not 'Run finished' in dat_out:
             raise ValueError('RIAF-SED failed to find a solution.')
     
     # Open the spectrum file
-    dat = np.loadtxt(os.path.join(riaf_sed_path, 'fortran/spec_01'))
+    dat = np.loadtxt(os.path.join(riaf_sed_path, spec_filename))
     
     nu = 10**dat[:,0]*u.Hz
     wav_sed = np.flip(nu.to(u.nm, equivalencies=u.spectral())*(1 + z))
@@ -765,6 +773,8 @@ class DemographicModel:
 
         samples['ndraws'] = np.empty(nbootstrap, dtype=np.int)
         
+        #samples['weight'] = np.ones([nbootstrap, ndraw_dim], np.nan, dtype=dtype)
+        
         for j in tqdm(range(nbootstrap)):
             
             np.random.seed(j)
@@ -798,6 +808,13 @@ class DemographicModel:
             sf_blue = Vred * trapz((phidM_blue/dM_star).value, M_star.value)
             sf_red = Vred * trapz((phidM_red/dM_star).value, M_star.value)
             sf_stellar = Vred * trapz((phidM_stellar/dM_star).value, M_star.value)
+            
+            """
+            Adaptive binning sampling
+            
+            Do some fancy sampling where we take phi to be flat
+            but assign a weight ~ phi for each galaxy with the same properties
+            """
             
             M_star_draw_blue = inv_transform_sampling((phidM_blue/dM_star).value, M_star_.value, survival=sf_blue)*u.Msun
             M_star_draw_red = inv_transform_sampling((phidM_red/dM_star).value, M_star_.value, survival=sf_red)*u.Msun
@@ -929,7 +946,7 @@ class DemographicModel:
         self.samples = samples
         
         
-    def sample_sed_grid(self, w0=1e-3, w1=1e8, band='SDSS_g', model_sed_name='optxagnf', nbins=8, save_fits=False, load_fits=False,
+    def sample_sed_grid(self, w0=1e-3, w1=1e8, band='SDSS_g', model_sed_name='optxagnf', nbins=9, save_fits=True, load_fits=False,
                        sed_pars={'bh_mass':1e8,'dist_c':30.0,'lambda_edd':np.log10(0.1),'spin':0,'r_cor':100,
                                  'log_r_out':-1,'kT_e':0.23,'tau':11,'gamma':2.2,'f_pl':0.05,'z':0.007,'norm':1}):
         
@@ -959,17 +976,50 @@ class DemographicModel:
         model_sed_riaf = {'wav':wav_RF.to(u.nm).value, 'dir':'/home/colinjb2/riaf-sed'}
         
         # Initalize the grid
-        # hard-coding some things to avoid boundary conditinos in the SEDs
+        # hard-coding some things to avoid boundary conditions in the SEDs
         x = np.logspace(2, 9, nbins)
-        y_agn = np.logspace(-3, 0, 3)
-        y_riaf = np.logspace(-8, -3, 5)
+        y = np.logspace(-8, 0, nbins)
+        y_agn = y[y>=1e-3]
+        y_riaf = y[y<1e-3]
         z = np.linspace(s['zmin'], s['zmax'], nbins)
         
         print(f'Creating SED grid in band {band}')
         
         if load_fits:
-            pass
+            hdul = fits.open('sed_grid.fits')
+            
+            data0 = hdul[0].data
+            nuf_nu = (10**data0) * u.erg/u.s/u.cm**2
+            
+            M_i_model = hdul[1].data
+            
+            shape = np.shape(nuf_nu)
+
+            data1 = hdul[2].data
+            x = 10**data1['log_M_BH']
+            y = 10**data1['log_LAMBDA_EDD']
+            z = data1['Z']
+            
+            d_L = cosmo.luminosity_distance(z).to(u.cm)
+
+            wav = (10**hdul[3].data['log_WAV']) * u.nm
+            bandpass = lib[band]
+
+            # Get L_band
+            f_lambda = nuf_nu/wav
+
+            f_lambda_band = np.full(shape[:-1], np.nan) * u.erg/u.s/u.cm**2/u.AA
+            for i in range(shape[0]):
+                for j in range(shape[1]):
+                    for k in range(shape[2]):
+                        f_lambda_band[i,j,k] = bandpass.get_flux(wav, f_lambda[i,j,k,:])
+
+            f_band = f_lambda_band * bandpass.lpivot
+            L_band_model = (f_band * 4*np.pi*d_L**2).value
+                        
         else:
+            
+            print('Generating AGN SEDs')
             # Get AGN luminosity in band and M_i(z=2)
             vget_AGN_flux = np.vectorize(get_AGN_flux, otypes=[np.float,np.float,np.float,np.float,np.ndarray])
 
@@ -979,6 +1029,7 @@ class DemographicModel:
             X, Y = np.meshgrid(x, y_agn, indexing='ij', sparse=True)
             M_i_model_AGN, _, _, _, _ = vget_AGN_flux(model_sed, M_BH=X, lambda_Edd=Y, z=2.0, band='SDSS_i')
             
+            print('Generating RIAF SEDs')
             # Get RIAF luminosity in band and M_i(z=2)
             vget_RIAF_flux = np.vectorize(get_RIAF_flux, otypes=[np.float,np.float,np.float,np.float,np.ndarray])
 
@@ -987,11 +1038,12 @@ class DemographicModel:
 
             X, Y = np.meshgrid(x, y_riaf, indexing='ij', sparse=True)
             M_i_model_RIAF, _, _, _, _ = vget_RIAF_flux(model_sed_riaf, M_BH=X, lambda_Edd=Y, z=2.0, band='SDSS_i')
-            
-            L_band_model = np.concatenate([L_band_model_AGN, L_band_model_RIAF])
-            M_i_model = np.concatenate([M_i_model_AGN, M_i_model_RIAF])
-            y = np.concatenate([y_agn, y_riaf])
-                
+                        
+            L_band_model = np.concatenate([L_band_model_RIAF, L_band_model_AGN], axis=1)
+            M_i_model = np.concatenate([M_i_model_RIAF, M_i_model_AGN], axis=1)
+            nuf_nu = np.concatenate([nuf_nu_RIAF, nuf_nu_AGN], axis=1)
+            y = np.concatenate([y_riaf, y_agn])
+                            
         self.samples[f'L_{band}_model'] = L_band_model*u.erg/u.s # Shape NxNxN
         self.samples['M_i_model'] = M_i_model # Shape NxNxN
                 
@@ -1048,8 +1100,11 @@ class DemographicModel:
             # Create FITS file
             nuf_nu = np.array(nuf_nu.tolist())
             hdu0 = fits.PrimaryHDU(nuf_nu)
+              
+            M_i_model = np.array(M_i_model.tolist())
+            hdu1 = fits.ImageHDU(M_i_model)
 
-            table_hdu = fits.HDUList([hdu0, table_hdu0, table_hdu1])
+            table_hdu = fits.HDUList([hdu0, hdu1, table_hdu0, table_hdu1])
             table_hdu.writeto('sed_grid.fits', overwrite=True)
             # M_i can be obtained using the approximation M_i = 125 - 3.3 log(L_bol / erg s^−1)
 
