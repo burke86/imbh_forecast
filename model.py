@@ -282,8 +282,16 @@ def f_occ_Bellovary19(M_star):
     f_interp = np.interp(np.log10(M_star), x, f)
     df_interp = np.interp(np.log10(M_star), x, 0.3*f)
     return np.clip(f_interp, 0, 1)
-    #return np.clip(np.random.normal(f_interp, df_interp), 0, 1)
 
+
+def f_occ_heavyMS(M_star):
+    """
+    Heavy-MS seed scenario
+    """
+    f = np.array([0.0, 0.0, 0.0, 0.0, 0.1, 0.4, 0.67, 0.95, 1.0, 1.0 , 1.0 , 1.0])
+    x = np.array([4.5, 5.5, 6.5, 7.5, 7.9, 8.3, 8.85, 9.35, 9.5, 10.5, 11.5, 12.5])
+    f_interp = np.interp(np.log10(M_star), x, f)
+    return np.clip(f_interp, 0, 1)
 
 def lambda_A(M_star):
     return 0.1*(np.log10(M_star)/9)**4.5
@@ -296,7 +304,7 @@ def ERDF_blue(lambda_Edd, xi=10**-1.65):
     # Lbr = 10**38.1 lambda_br M_BH_br
     # 10^41.67 = 10^38.1 * 10^x * 10^10.66
     lambda_br = 10**np.random.normal(-1.84, np.mean([0.30, 0.37]))
-    delta1 = np.random.normal(0.471-0.45, np.mean([0.20, 0.42]))
+    delta1 = np.random.normal(0.471-0.7, np.mean([0.02, 0.02])) # -0.7 #np.random.normal(0.471, np.mean([0.20, 0.42])) # -0.45
     delta2 = np.random.normal(2.53, np.mean([0.68, 0.38]))
     # https://ui.adsabs.harvard.edu/abs/2019ApJ...883..139S/abstract
     # What sets the break? Transfer from radiatively efficient to inefficient accretion?
@@ -310,22 +318,22 @@ def ERDF_red(lambda_Edd, xi=10**-2.13):
     # Lbr = 10**38.1 lambda_br M_BH_br
     # 10^41.67 = 10^38.1 * 10^x * 10^10.66
     lambda_br = 10**np.random.normal(-2.81, np.mean([0.22, 0.14]))
-    delta1 = np.random.normal(0.41-0.45, np.mean([0.02, 0.02]))
+    delta1 = np.random.normal(0.41-0.7, np.mean([0.02, 0.02])) # This is not sensitive
     delta2 = np.random.normal(1.22, np.mean([0.19, 0.13]))
     # https://ui.adsabs.harvard.edu/abs/2019ApJ...883..139S/abstract
     # What sets the break? Transfer from radiatively efficient to inefficient accretion?
     return xi * ((lambda_Edd/lambda_br)**delta1 + (lambda_Edd/lambda_br)**delta2)**-1 # dN / dlog lambda
 
 
-def get_RIAF_flux(model_sed, M_BH=1e6, lambda_Edd=1e-4, z=0.01, M_BH_template=4e6, lambda_Edd_template=1e-4, s=0.3, p=2.3,
-                  alpha=0.3, beta=0.9, delta=0.001, gamma=1.5, theta=30, sl0i=2.0, sl0f=3.0, band='SDSS_g'):
+def get_RIAF_flux(model_sed, M_BH=1e6, lambda_Edd=1e-4, z=0.01, M_BH_template=4e6, lambda_Edd_template=1e-4, z_template=0.01,
+                  s=0.3, p=2.3, alpha=0.3, beta=0.9, delta=0.001, gamma=1.5, theta=30, sl0i=2.0, sl0f=3.0, band='SDSS_g'):
     """
     Compute the SED of a radiatively inefficient accretion flow (RIAF) following Nemmen et al. 2006; Nemmen et al. 2014
     https://academic.oup.com/mnras/article/438/4/2804/2907740
     https://github.com/rsnemmen/riaf-sed
     
     The RIAF SED code doesn't really work, so just use some template parameters as a template and re-scale everything after
-    like L ~ lambda_Edd^2 and L ~ M_BH
+    like L ~ lambda_Edd and L ~ M_BH
     
     To fit a SED, delta and p make the biggest differences
     
@@ -349,6 +357,7 @@ def get_RIAF_flux(model_sed, M_BH=1e6, lambda_Edd=1e-4, z=0.01, M_BH_template=4e
     bandpass = lib[band]
     # Input redshift
     d_L = cosmo.luminosity_distance(z).to(u.cm)
+    d_L_template = cosmo.luminosity_distance(z_template).to(u.cm)
 
     R_s = 2*const.G*M_BH*u.Msun/(const.c**2)
     R_s = R_s.to(u.cm)
@@ -379,7 +388,7 @@ def get_RIAF_flux(model_sed, M_BH=1e6, lambda_Edd=1e-4, z=0.01, M_BH_template=4e
     dotmo_str = to_fortran(dotmo)
     M_BH6_str = to_fortran(M_BH_template/1e6)
     Ro_str = to_fortran(_Ro)
-    d_pc_str = to_fortran(d_L.to(u.pc).value)
+    d_pc_str = to_fortran(d_L_template.to(u.pc).value)
     p_str = to_fortran(p)
     alpha_str = to_fortran(alpha)
     beta_str = to_fortran(beta)
@@ -407,7 +416,7 @@ def get_RIAF_flux(model_sed, M_BH=1e6, lambda_Edd=1e-4, z=0.01, M_BH_template=4e
                 with open(os.path.join(riaf_sed_path, out_filename), 'r') as out_file:
                     dat_out = out_file.read()
                     if 'Run finished' in dat_out:
-                        print('Re-using previous run.')
+                        #print('Re-using previous run.')
                         run = False
                     
     if run:
@@ -444,6 +453,9 @@ def get_RIAF_flux(model_sed, M_BH=1e6, lambda_Edd=1e-4, z=0.01, M_BH_template=4e
     # Wein's law lambda ~ 1/T
     wav_sed = wav_sed/T_M
     wav_sed = wav_sed/T_l
+    
+    # K-correction
+    wav_sed = wav_sed/(1 + z_template)*(1 + z)
     
     sed = 10**dat[:,1]*u.erg/u.s/(4*np.pi*d_L**2)
     nuf_nu = np.flip(sed.to(u.erg/u.cm**2/u.s))
@@ -654,7 +666,7 @@ class DemographicModel:
         
 
     def sample(self, nbins=10, nbootstrap=50, eta=1e4, zmax=0.1, ndraw_dim=1e7, omega=4*np.pi,
-               seed_dict={'dc':(lambda x: np.ones_like(x)), 'popIII':f_occ_Bellovary19, 'dc_stellar':(lambda x: np.ones_like(x))},
+               seed_dict={'dc':(lambda x: np.ones_like(x)), 'popIII':f_occ_heavyMS, 'dc_stellar':(lambda x: np.ones_like(x))},
                ERDF_mode=0, log_edd_mu=-1, log_edd_sigma=0.2):
 
         """
@@ -682,11 +694,11 @@ class DemographicModel:
         pars['ndraw_dim'] = ndraw_dim
         pars['seed_dict'] = seed_dict
         
-        pars['log_lambda_min'] = -8.0 # -8
-        pars['log_lambda_max'] = 1.0
+        pars['log_lambda_min'] = -8.5 # -8
+        pars['log_lambda_max'] = 0.5
         
         pars['log_M_star_min'] = 5.5 #4.5
-        pars['log_M_star_max'] = 12
+        pars['log_M_star_max'] = 12.5
         
         pars['log_M_BH_min'] = 1.5
         pars['log_M_BH_max'] = 9.5
@@ -754,6 +766,8 @@ class DemographicModel:
         dlambda = np.diff(lambda_)
         dloglambda = np.diff(np.log10(lambda_))
         pars['lambda_Edd'] = lambda_[1:] + dlambda/2 # bins
+        
+        print('log lambda bins: ', np.around(np.log10(pars['lambda_Edd']), 2))
 
         samples['lambda_draw'] = np.full([nbootstrap, ndraw_dim], np.nan, dtype=dtype)
         samples['g-r'] = np.full([nbootstrap, ndraw_dim], np.nan, dtype=dtype)
@@ -786,7 +800,10 @@ class DemographicModel:
             # 2. Draw from GSMF [Mpc^-3]
             phidM_blue = GSMF_blue(M_star.value, z_draw)*dM_star
             phidM_red = GSMF_red(M_star.value, z_draw)*dM_star
-            phidM_stellar = GSMF_stellar(M_star.value, z_draw) #*dM_star
+            if '_stellar' in seed.lower():
+                phidM_stellar = GSMF_stellar(M_star.value, z_draw) #*dM_star
+            else:
+                phidM_stellar = np.zeros_like(M_star.value)
             
             # Convert log M_BH to log M_star
             phidM_stellar = phidM_stellar * dlogM_BH / dlogM_star
@@ -851,8 +868,8 @@ class DemographicModel:
             
             if ndraw > ndraw_dim:
                 print("ndraw > ndraw_dim! Try increasing ndraw_dim.")
-                print('ndraw: ', ndraw)
-                print('ndraw_dim: ', ndraw_dim)
+                print('log ndraw: ', np.log10(ndraw))
+                print('log ndraw_dim: ', np.log10(ndraw_dim))
                 ndraw = ndraw_dim
                 M_star_draw = M_star_draw[:ndraw]
                 mask_stellar = mask_stellar[:ndraw]
@@ -876,7 +893,8 @@ class DemographicModel:
             g_minus_r_draw[mask_red] = g_minus_r_model_red(M_star_draw[mask_red].value, seed=j)
             g_minus_r_draw[mask_blue] = g_minus_r_model_blue(M_star_draw[mask_blue].value, seed=j)
             ## Assume blue colors for stellar channels
-            g_minus_r_draw[mask_stellar] = g_minus_r_model_blue(M_star_draw[mask_stellar].value, seed=j)
+            if '_stellar' in seed.lower():
+                g_minus_r_draw[mask_stellar] = g_minus_r_model_blue(M_star_draw[mask_stellar].value, seed=j)
             samples['g-r'][j,:ndraw] = g_minus_r_draw
             
             # 4. BH Mass Function
@@ -1016,6 +1034,9 @@ class DemographicModel:
 
             f_band = f_lambda_band * bandpass.lpivot
             L_band_model = (f_band * 4*np.pi*d_L**2).value
+            
+            # Something is wrong with this! Check L_band_model is reasonable
+            # and M_i_model
                         
         else:
             
@@ -1098,8 +1119,8 @@ class DemographicModel:
             table_hdu1 = fits.BinTableHDU.from_columns([c1])
 
             # Create FITS file
-            nuf_nu = np.array(nuf_nu.tolist())
-            hdu0 = fits.PrimaryHDU(nuf_nu)
+            log_nuf_nu = np.log10(np.array(nuf_nu.tolist()))
+            hdu0 = fits.PrimaryHDU(log_nuf_nu)
               
             M_i_model = np.array(M_i_model.tolist())
             hdu1 = fits.ImageHDU(M_i_model)
