@@ -714,8 +714,9 @@ class DemographicModel:
             with open(os.path.join(workdir, f'pars_{survey}.pkl'), 'rb') as f:
                 self.pars = pickle.load(f)
         return
+    
                       
-    def save(self):
+    def save(self, survey='lsst'):
         with open(os.path.join(self.workdir, f'pars_{survey}.pkl'), 'wb') as f:
             pickle.dump(self.pars, f)
         return
@@ -738,9 +739,9 @@ class DemographicModel:
         
 
     def sample(self, nbins=10, nbootstrap=50, eta=1e4, zmax=0.1, ndraw_dim=1e7, omega=4*np.pi,
-               seed_dict={'dc':(lambda x: np.ones_like(x)), 'popIII':f_occ_heavyMS, 'dc_stellar':(lambda x: np.ones_like(x))},
+               seed_dict={'light':(lambda x: np.ones_like(x)), 'heavy':f_occ_heavyMS, 'light_stellar':(lambda x: np.ones_like(x))},
                ERDF_mode=0, log_edd_mu=-1, log_edd_sigma=0.2):
-
+        
         """
         See https://iopscience.iop.org/article/10.3847/1538-4357/aa803b/pdf
 
@@ -1122,7 +1123,7 @@ class DemographicModel:
         fn_M_i_model = RegularGridInterpolator((np.log10(x), np.log10(y)), M_i_model,
                                                bounds_error=False, fill_value=None)
                 
-        for k, seed in enumerate(pars['seed_dict']):
+        for k, seed in enumerate(pars['seed_keys']):
             
             print(f'Sampling SEDs with seeding mechanism {seed}')
         
@@ -1369,8 +1370,6 @@ class DemographicModel:
         #samples[f'lc_{band}_{seed}'] = mag
         samples[f'lc_{band}_{seed}_idx'][mask_small] = -1
 
-        print('Calculating observed variability significance')
-
         # Calculate variability significance
         indx = samples[f'lc_{band}_{seed}_idx'][~mask_small]
         indx = indx[np.isfinite(indx)].astype(np.int)
@@ -1410,7 +1409,7 @@ class DemographicModel:
         
         pars['lc_t_obs'] = t_obs
                         
-        for k, seed in enumerate(pars['seed_dict']):
+        for k, seed in enumerate(pars['seed_keys']):
             
             print(f'Sampling light curves with seeding mechanism {seed}')
             
@@ -1418,9 +1417,7 @@ class DemographicModel:
                 
                 SFinf, tau, z, m_band, mask = self.sample_SF_tau(j, seed, t_obs, pm_prec=pm_prec, band=band,
                                                                  SFinf_small=SFinf_small, m_5=m_5)
-                
-                print('Generating light curves')
-                
+                                
                 """
                 mask_small = (SFinf < pm_prec(m_band)) | (M_BH < 1e2*u.Msun) | (m_band > m_5+1)
                 """
