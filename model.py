@@ -169,14 +169,14 @@ def GSMF_red(M_star, z):
 
 def GSMF_stellar(M_star, z):
     # Currently only defined at z=0
-    alpha = 7.45
-    beta = 1.05
-    M_star_br = 1e11
+    alpha = 2.62
+    beta = 8.22
+    M_star_br = 10**7.83
     M_BH = 10**(alpha + beta*np.log10(M_star/M_star_br))
-    return _BHMF_stellar(M_BH) 
+    return BHMF_wandering(M_BH) 
 
 
-def _BHMF_stellar(M_BH):
+def _BHMF_wandering(M_BH):
     # Fig. 14 https://arxiv.org/pdf/2110.15607.pdf
     # z=0
     log_M_BH = np.log10(M_BH)
@@ -189,9 +189,20 @@ def _BHMF_stellar(M_BH):
     _log_phi = dat[:,1]
     # Interpolate to M_BH
     log_phi = interp1d(_log_M_BH, _log_phi, fill_value='extrapolate')
-    phi = 10**(log_phi(log_M_BH))*u.Mpc**-3
+    phi = 10**(log_phi(log_M_BH) + np.random.normal(0.0, 0.5, size=len(log_M_BH)))*u.Mpc**-3
     # Convert log M_BH to log M_star
     #phi = phi * dlog_M_BH / dlog_M_stellar
+    return phi
+
+
+def BHMF_wandering(M_BH):
+    """
+    Anchored to # Fig. 14 https://arxiv.org/pdf/2110.15607.pdf
+    """
+    phi = 10**np.random.normal(4, 0.3)
+    M_BH_br = 1e4
+    alpha = -1.0
+    phi = np.exp(-M_BH/M_BH_br)/M_BH_br * phi*(M_BH/M_BH_br)**alpha
     return phi
 
 
@@ -758,6 +769,8 @@ class DemographicModel:
             1 = active fraction
         """
         
+        #etas = 
+        
         pars = {'nbins':nbins, 'nbootstrap':nbootstrap, 'eta':eta}
         workdir = self.workdir
         
@@ -770,7 +783,7 @@ class DemographicModel:
         pars['log_lambda_min'] = -8.5
         pars['log_lambda_max'] = 0.5
         
-        pars['log_M_star_min'] = 5.5 #4.5
+        pars['log_M_star_min'] = 4.5
         pars['log_M_star_max'] = 12.5
         
         pars['log_M_BH_min'] = 1.5
@@ -795,6 +808,12 @@ class DemographicModel:
             beta = np.random.normal(loc=1.05, scale=0.11, size=nbootstrap)
             M_star_br = 1e11*u.Msun
             M_BH_norm = 1*u.Msun
+        
+        # M_BH - M_NSC relation from Graham 2020
+        alpha_SC = np.random.normal(loc=8.22, scale=0.20, size=nbootstrap)
+        beta_SC = np.random.normal(loc=2.62, scale=0.42, size=nbootstrap)
+        M_SC_br = 10**7.83*u.Msun
+        M_star_norm_SC = 1*u.Msun
 
         # Stellar Mass Function
         M_star_ = np.logspace(pars['log_M_star_min'], pars['log_M_star_max'], nbins+1, dtype=dtype)*u.Msun
@@ -820,7 +839,8 @@ class DemographicModel:
         M_BH_ = np.logspace(pars['log_M_BH_min'], pars['log_M_BH_max'], nbins+1, dtype=dtype)*u.Msun
         dM_BH = np.diff(M_BH_)
         dlogM_BH = np.diff(np.log10(M_BH_.value))
-        pars['M_BH'] = M_BH_[1:] + dM_BH/2 # bins
+        M_BH = M_BH_[1:] + dM_BH/2 # bins
+        pars['M_BH'] = M_BH
         
         print('log M_BH bins: ', np.around(np.log10(pars['M_BH'].value), 2))
 
@@ -860,42 +880,65 @@ class DemographicModel:
             phidM_blue = GSMF_blue(M_star.value, z_draw)*dM_star
             phidM_red = GSMF_red(M_star.value, z_draw)*dM_star
             if '_stellar' in seed.lower():
-                phidM_stellar = GSMF_stellar(M_star.value, z_draw) #*dM_star
+                phidM_wandering = BHMF_wandering(M_BH.value) #*dM_star
+                #phidM_stellar = GSMF_stellar(M_star.value, z_draw) #*dM_star
                 # Convert log M_BH to log M_star
-                phidM_stellar = phidM_stellar * dlogM_BH / dlogM_star
+                #phidM_stellar = phidM_stellar * dlogM_BH / dlogM_star
             else:
-                phidM_stellar = np.zeros_like(M_star.value)
+                phidM_wandering = np.zeros_like(M_BH.value)
                         
             # phi = dn / dlog M  = dN / dV / dlog M
             # Normalize
-            Vred = V.to(u.Mpc**3).value / eta # Reduced volume
+            Vred = V.to(u.Mpc**3).value / eta # Reduced comoving volume
             sf_blue = Vred * trapz((phidM_blue/dM_star).value, M_star.value)
             sf_red = Vred * trapz((phidM_red/dM_star).value, M_star.value)
-            sf_stellar = Vred * trapz((phidM_stellar/dM_star).value, M_star.value)
+            #sf_stellar = Vred * trapz((phidM_stellar/dM_star).value, M_star.value)
+            sf_wandering = Vred * trapz((phidM_wandering/dM_BH).value, M_BH.value)
             
             M_star_draw_blue = inv_transform_sampling((phidM_blue/dM_star).value, M_star_.value, survival=sf_blue)*u.Msun
             M_star_draw_red = inv_transform_sampling((phidM_red/dM_star).value, M_star_.value, survival=sf_red)*u.Msun
-            M_star_draw_stellar = inv_transform_sampling((phidM_stellar/dM_star).value, M_star_.value, survival=sf_stellar)*u.Msun
+            #M_star_draw_stellar = inv_transform_sampling((phidM_stellar/dM_star).value, M_star_.value, survival=sf_stellar)*u.Msun
+            M_BH_draw_wandering = inv_transform_sampling((phidM_wandering/dM_BH).value, M_BH_.value, survival=sf_wandering)*u.Msun
             
-            # Red + blue + stellar population
-            M_star_draw = np.concatenate([M_star_draw_stellar, M_star_draw_blue, M_star_draw_red])
+            # Number of sources
+            #ndraw = len(M_BH_draw_wandering) + len(M_star_draw_blue) + len(M_star_draw_red)
+            ndraw_gal = len(M_star_draw_blue) + len(M_star_draw_red)
+            ndraw_wandering = len(M_BH_draw_wandering)
+            ndraw = ndraw_gal + ndraw_wandering
+            
+            # Get stellar mass of wandering BHs (?)
+            #M_star_draw_wandering = np.full(ndraw_wandering, np.nan, dtype=dtype)*u.Msun
+            M_star_draw_wandering = 10**((np.log10(M_BH_draw_wandering/M_SC_br) - alpha_SC[j])/beta_SC[j] + np.random.normal(0.0, 0.5, size=ndraw_wandering))*M_star_norm_SC
+            # Red + blue + wandering population
+            M_star_draw = np.concatenate([M_star_draw_wandering, M_star_draw_blue, M_star_draw_red])
             
             print('log N galaxies: ', np.around(np.log10(len(M_star_draw)), 2))
-            print(np.around(np.log10(len(M_star_draw_stellar)), 2), np.around(np.log10(len(M_star_draw_blue)), 2), np.around(np.log10(len(M_star_draw_red)), 2))
+            print(np.around(np.log10(len(M_BH_draw_wandering)), 2), np.around(np.log10(len(M_star_draw_blue)), 2), np.around(np.log10(len(M_star_draw_red)), 2))
             
-            mask_stellar = np.concatenate([np.full(len(M_star_draw_stellar), True),
+            mask_wandering = np.concatenate([np.full(ndraw_wandering, True),
                                            np.full(len(M_star_draw_blue), False),
                                            np.full(len(M_star_draw_red), False)])
-            mask_red = np.concatenate([np.full(len(M_star_draw_stellar), False),
+            mask_red = np.concatenate([np.full(ndraw_wandering, False),
                                        np.full(len(M_star_draw_blue), False),
                                        np.full(len(M_star_draw_red), True)])
-            mask_blue = np.concatenate([np.full(len(M_star_draw_stellar), False),
+            mask_blue = np.concatenate([np.full(ndraw_wandering, False),
                                         np.full(len(M_star_draw_blue), True),
                                         np.full(len(M_star_draw_red), False)])
             
-            # Number of sources
-            ndraw = len(M_star_draw_stellar) + len(M_star_draw_blue) + len(M_star_draw_red)
-            z_draw = z_draw[:ndraw]
+            #z_draw = z_draw[:ndraw] # I ??
+            
+            if ndraw > ndraw_dim:
+                print("ndraw > ndraw_dim! Try increasing ndraw_dim.")
+                print('log ndraw: ', np.log10(ndraw))
+                print('log ndraw_dim: ', np.log10(ndraw_dim))
+                
+            # Shuffle
+            p = np.random.permutation(ndraw)
+            M_star_draw = M_star_draw[p]
+            mask_wandering = mask_wandering[p]
+            mask_red = mask_red[p]
+            mask_blue = mask_blue[p]
+            z_draw = z_draw[:ndraw][p]
             
             # Initialize arrays
             samples = {}
@@ -905,33 +948,16 @@ class DemographicModel:
             samples['lambda_draw'] = np.full(ndraw, np.nan, dtype=dtype)
             samples['g-r'] = np.full(ndraw, np.nan, dtype=dtype)
             samples['pop'] = np.full(ndraw, np.nan, dtype=np.int)
-            
-            # Shuffle
-            p = np.random.permutation(ndraw)
-            M_star_draw = M_star_draw[p]
-            mask_stellar = mask_stellar[p]
-            mask_red = mask_red[p]
-            mask_blue = mask_blue[p]
-            
-            if ndraw > ndraw_dim:
-                print("ndraw > ndraw_dim! Try increasing ndraw_dim.")
-                print('log ndraw: ', np.log10(ndraw))
-                print('log ndraw_dim: ', np.log10(ndraw_dim))
-                ndraw = ndraw_dim
-                M_star_draw = M_star_draw[:ndraw]
-                mask_stellar = mask_stellar[:ndraw]
-                mask_red = mask_red[:ndraw]
-                mask_blue = mask_blue[:ndraw]
                 
             # Mask galaxy populations
-            samples['pop'][mask_stellar] = 2
+            samples['pop'][mask_wandering] = 2
             samples['pop'][mask_red] = 1
             samples['pop'][mask_blue] = 0
                         
             pars['ndraws'][j] = ndraw
             samples['z_draw'] = z_draw
             samples['M_star_draw'] = M_star_draw
-            hists['n_i_M'][j,:], _ = hist1d(M_star_draw.value[~mask_stellar], bins=M_star_.value)
+            hists['n_i_M'][j,:], _ = hist1d(M_star_draw.value[~mask_wandering], bins=M_star_.value)
             
             print('Sampling host galaxy colors')
 
@@ -940,19 +966,20 @@ class DemographicModel:
             g_minus_r_draw[mask_red] = g_minus_r_model_red(M_star_draw[mask_red].value, seed=j)
             # Assume blue colors for stellar channels
             if '_stellar' in seed.lower():
-                g_minus_r_draw[mask_stellar] = g_minus_r_model_blue(M_star_draw[mask_stellar].value, seed=j)
+                g_minus_r_draw[mask_wandering] = g_minus_r_model_blue(M_star_draw[mask_wandering].value, seed=j)
             #else:
             g_minus_r_draw[mask_blue] = g_minus_r_model_blue(M_star_draw[mask_blue].value, seed=j)
             samples['g-r'] = g_minus_r_draw
             
-            # 4. BH Mass Function
-            M_BH_draw = 10**(alpha[j] + beta[j]*np.log10(M_star_draw/M_star_br) +
-                             np.random.normal(0.0, 0.55, size=ndraw))*M_BH_norm
-            samples['M_BH_draw'] = M_BH_draw
+            # Host galaxy stellar mass
+            M_BH_draw = np.full(ndraw, np.nan, dtype=dtype)*u.Msun
+            M_BH_draw[~mask_wandering] = 10**(alpha[j] + beta[j]*np.log10(M_star_draw[~mask_wandering]/M_star_br) +
+                                            np.random.normal(0.0, 0.55, size=ndraw_gal))*M_BH_norm
+            M_BH_draw[mask_wandering] = M_BH_draw_wandering
             
             print('Sampling ERDF')
             
-            # 5. Eddington ratio Function
+            # Eddington ratio distribution function (ERDF)
             if ERDF_mode == 0:
                 lambda_draw = np.full(ndraw, np.nan)
                 # Blue  
@@ -965,7 +992,7 @@ class DemographicModel:
                 xi_stellar = xi_stellar/norm
                 lambda_draw[mask_blue] = inv_transform_sampling(xi_blue/dlambda, lambda_, np.count_nonzero(mask_blue))
                 lambda_draw[mask_red] = inv_transform_sampling(xi_red/dlambda, lambda_, np.count_nonzero(mask_red))
-                lambda_draw[mask_stellar] = inv_transform_sampling(xi_stellar/dlambda, lambda_, np.count_nonzero(mask_stellar))
+                lambda_draw[mask_wandering] = inv_transform_sampling(xi_stellar/dlambda, lambda_, np.count_nonzero(mask_wandering))
             elif ERDF_mode == 1:
                 p = lambda_A(M_star_draw.value)
                 lambda_draw_init = 10**np.random.normal(log_edd_mu, log_edd_sigma, ndraw)
@@ -984,9 +1011,9 @@ class DemographicModel:
                 
                 # Mask artificial stellar BHMF "host galaxies" unless "*_stellar" in key
                 if '_stellar' in seed.lower():
-                    mask_seed = mask_stellar | mask_blue | mask_red
+                    mask_seed = mask_wandering | mask_blue | mask_red
                 else:
-                    mask_seed = ~mask_stellar
+                    mask_seed = ~mask_wandering
                 
                 # Occupation probabililty survival sampling
                 p = seed_dict[f'{seed}'](M_star_draw.value[mask_seed])
@@ -1429,7 +1456,7 @@ class DemographicModel:
         return
             
         
-    def plot(self, figsize=(3*6*0.9, 2*5*0.9), seed_colors=['b','m','g'], seed_markers=['s','o','^'], moct=np.nanmean, n_bin_min=10):
+    def plot(self, seed_dict={'light':(lambda x: np.ones_like(x)), 'heavy':f_occ_heavyMS, 'light_stellar':(lambda x: np.ones_like(x))}, seed_colors=None, seed_markers=None, figsize=(3*6, 2*5), moct=np.nanmean, n_bin_min=10):
     
         import matplotlib.ticker as ticker
 
@@ -1437,25 +1464,28 @@ class DemographicModel:
         axs = axs.flatten()
         
         pars = self.pars
-        hists = self.hists
         ndraws = pars['ndraws']
+        workdir = self.workdir
         
         ndraw_dim = int(np.max(ndraws))
         
         V = pars['V']
-        n_i_M = hists['n_i_M'][:,:ndraw_dim]
-        n_i_Edd = hists['n_i_Edd'][:,:ndraw_dim]
+        
+        n_i_M = np.load(os.path.join(workdir, f'hist_n_i_M.npy'))
+        n_i_Edd = np.load(os.path.join(workdir, f'hist_n_i_Edd.npy'))
+        #n_i_M = hists['n_i_M'] #[:,:ndraw_dim]
+        #n_i_Edd = hists['n_i_Edd'] #[:,:ndraw_dim]
         
         # Clean
-        n_i_M[:,n_i_M[0] < n_bin_min] = np.nan
-        n_i_Edd[:,n_i_Edd[0] < n_bin_min] = np.nan
-                
+        #n_i_M[:, n_i_M[0] < n_bin_min] = np.nan
+        #n_i_Edd[:, n_i_Edd[0] < n_bin_min] = np.nan
+                        
         M_star_ = pars['M_star_']
-        
         M_star = pars['M_star']
         M_BH = pars['M_BH']
         lambda_Edd = pars['lambda_Edd']
         L = pars['L']
+        
         dlogM_star = np.diff(np.log10(M_star.value))[0]
         dlogM_BH = np.diff(np.log10(M_BH.value))[0]
         dloglambda = np.diff(np.log10(lambda_Edd))[0]
@@ -1485,18 +1515,18 @@ class DemographicModel:
         # 3. BH occupation fraction
         nbootstrap = pars['nbootstrap']
 
-        for k, seed in enumerate(pars['seed_dict']):
+        for k, seed in enumerate(pars['seed_keys']):
             
             if '_stellar' in seed.lower():
                 continue
             
             f = np.zeros([nbootstrap, len(M_star)])
             for j in range(nbootstrap):
-                f[j,:] = pars['seed_dict'][f'{seed}'](M_star.value)
+                f[j,:] = seed_dict[seed](M_star.value)
                 
             axs[1].fill_between(M_star.value, np.percentile(f, 16, axis=0), np.percentile(f, 84, axis=0),
-                                color=seed_colors[k], alpha=0.5)
-            axs[1].scatter(M_star, moct(f, axis=0), lw=3, color=seed_colors[k], marker=seed_markers[k])
+                                color=seed_colors[seed], alpha=0.5)
+            axs[1].scatter(M_star, moct(f, axis=0), lw=3, color=seed_colors[seed], marker=seed_markers[seed])
         
         axs[1].set_xlabel(r'$M_{\star}\ (M_{\odot})$', fontsize=18)
         axs[1].set_ylabel(r'$\lambda_{\rm{occ}}$', fontsize=18)
@@ -1506,8 +1536,11 @@ class DemographicModel:
                                   
         # Bootstrap loop
         for j in range(1):
-            M_star_draw = np.load(os.path.join(self.workdir, f'samples_M_star_draw_{j}'))[:ndraw]*u.Msun
-            M_BH_draw = np.load(os.path.join(self.workdir, f'samples_M_BH_draw_{j}'))[:ndraw]*u.Msun
+            pop = self.load_sample(f'pop', j=j)
+            mask_pop = pop < 2
+            
+            M_star_draw = self.load_sample('M_star_draw', j=j)[mask_pop]
+            M_BH_draw = self.load_sample(f'M_BH_draw_{seed}', j=j)[mask_pop]
         
             # M_BH - M_star
             bin_med, _, _ = st.binned_statistic(M_star_draw.flatten(), M_BH_draw.flatten(), np.nanmedian, bins=M_star_)
@@ -1524,18 +1557,21 @@ class DemographicModel:
         axs[2].set_xlabel(r'$M_{\rm{\star}}\ (M_{\odot})$', fontsize=18)
         
         # BH mass function
-        for k, seed in enumerate(pars['seed_dict']):
-            axs[3].fill_between(M_BH.value, (np.nanpercentile(hists[f'n_i_M_{seed}'][:,:ndraw_dim], 16, axis=0)/dlogM_BH/V).value,
-                                (np.nanpercentile(hists[f'n_i_M_{seed}'][:,:ndraw_dim], 84, axis=0)/dlogM_BH/V).value, color=seed_colors[k], alpha=0.5)
-            axs[3].scatter(M_BH, moct(hists[f'n_i_M_{seed}'][:,:ndraw_dim], axis=0)/dlogM_BH/V,
-                           lw=3, color=seed_colors[k], marker=seed_markers[k])
+        for k, seed in enumerate(pars['seed_keys']):
+            n_i_M_seed = np.load(os.path.join(workdir, f'hist_n_i_M_{seed}.npy'))
+            axs[3].fill_between(M_BH.value,
+                                (np.nanpercentile(n_i_M_seed, 16, axis=0)/dlogM_BH/V).value,
+                                (np.nanpercentile(n_i_M_seed, 84, axis=0)/dlogM_BH/V).value, 
+                                color=seed_colors[seed], alpha=0.5)
+            axs[3].scatter(M_BH, moct(n_i_M_seed, axis=0)/dlogM_BH/V,
+                           lw=3, color=seed_colors[seed], marker=seed_markers[seed])
 
         axs[3].set_xlabel(r'$M_{\rm{BH}}\ (M_{\odot})$', fontsize=18)
         axs[3].set_ylabel(r'$\phi(M_{\rm{BH}})$ (dex$^{-1}$ Mpc$^{-3}$)', fontsize=18)
         axs[3].set_xscale('log')
         axs[3].set_yscale('log')
         axs[3].set_xlim([1e2, 1e8])
-        axs[3].set_ylim([1e-3, 1e3])
+        axs[3].set_ylim([1e-4, 1e4])
 
         # 5. Eddington ratio distribution (ERDF) function
         norm = np.nansum(moct(n_i_Edd, axis=0)*dloglambda)
@@ -1551,18 +1587,18 @@ class DemographicModel:
         axs[4].set_ylim([1e-4, 1e1])
         
         # 6. AGN Luminosity Function
-        for k, seed in enumerate(pars['seed_dict']):
+        for k, seed in enumerate(pars['seed_keys']):
             
-            n_i_L = hists[f'n_i_L_{seed}'][:,:ndraw_dim]
-            n_i_L[:,n_i_L[0] < n_bin_min] = np.nan
+            n_i_L_seed = np.load(os.path.join(workdir, f'hist_n_i_L_{seed}.npy'))
+            #n_i_L_seed[:,n_i_L_seed[0] < n_bin_min] = np.nan
             
             mask_L = L.value < 1e45 ##
             
-            axs[5].scatter(L[mask_L], moct(n_i_L, axis=0)[mask_L]/dlogL/V,
-                           lw=3, color=seed_colors[k], marker=seed_markers[k])
-            axs[5].fill_between(L[mask_L].value, (np.nanpercentile(n_i_L, 16, axis=0)[mask_L]/dlogL/V).value,
-                                (np.nanpercentile(n_i_L, 84, axis=0)[mask_L]/dlogL/V).value,
-                                color=seed_colors[k], alpha=0.5)
+            axs[5].scatter(L[mask_L], moct(n_i_L_seed, axis=0)[mask_L]/dlogL/V,
+                           lw=3, color=seed_colors[seed], marker=seed_markers[seed])
+            axs[5].fill_between(L[mask_L].value, (np.nanpercentile(n_i_L_seed, 16, axis=0)[mask_L]/dlogL/V).value,
+                                (np.nanpercentile(n_i_L_seed, 84, axis=0)[mask_L]/dlogL/V).value,
+                                color=seed_colors[seed], alpha=0.5)
         
         def phi_shen(L):
             # z = 0.2
@@ -1580,15 +1616,15 @@ class DemographicModel:
         axs[5].set_ylabel(r'$\phi(L_{\rm{bol}})$ (dex$^{-1}$ Mpc$^{-3}$)', fontsize=18)
         axs[5].set_xscale('log')
         axs[5].set_yscale('log')
-        axs[5].set_xlim([1e36, 1e47])
-        axs[5].set_ylim([1e-9, None])
+        axs[5].set_xlim([1e36, 1e45])
+        axs[5].set_ylim([1e-8, None])
 
         import string, matplotlib
         labels = list(string.ascii_lowercase)
 
         for i, ax in enumerate(axs):
 
-            ax.text(0.02, 0.93, f'({labels[i]})', transform=ax.transAxes, fontsize=16, weight='bold', zorder=10)
+            ax.text(0.02, 0.91, f'({labels[i]})', transform=ax.transAxes, fontsize=16, weight='bold', zorder=10)
             ax.tick_params(axis='x', which='major', pad=7)
 
             ax.tick_params('both', labelsize=18)
