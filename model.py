@@ -199,9 +199,9 @@ def BHMF_wandering(M_BH):
     """
     Anchored to # Fig. 14 https://arxiv.org/pdf/2110.15607.pdf
     """
-    phi = 10**np.random.normal(4, 0.3)
-    M_BH_br = 1e4
-    alpha = -1.0
+    phi = 10**np.random.normal(5, 0.3)
+    M_BH_br = 1e5
+    alpha = -1.5
     phi = np.exp(-M_BH/M_BH_br)/M_BH_br * phi*(M_BH/M_BH_br)**alpha
     return phi
 
@@ -870,6 +870,8 @@ class DemographicModel:
         # Bootstrap loop
         for j in tqdm(range(nbootstrap)):
             
+            # Doing this for all seed scenarios to save memory
+            
             # Set random seed
             np.random.seed(j)
 
@@ -880,10 +882,7 @@ class DemographicModel:
             phidM_blue = GSMF_blue(M_star.value, z_draw)*dM_star
             phidM_red = GSMF_red(M_star.value, z_draw)*dM_star
             if '_stellar' in seed.lower():
-                phidM_wandering = BHMF_wandering(M_BH.value) #*dM_star
-                #phidM_stellar = GSMF_stellar(M_star.value, z_draw) #*dM_star
-                # Convert log M_BH to log M_star
-                #phidM_stellar = phidM_stellar * dlogM_BH / dlogM_star
+                phidM_wandering = BHMF_wandering(M_BH.value)*dM_BH
             else:
                 phidM_wandering = np.zeros_like(M_BH.value)
                         
@@ -892,28 +891,24 @@ class DemographicModel:
             Vred = V.to(u.Mpc**3).value / eta # Reduced comoving volume
             sf_blue = Vred * trapz((phidM_blue/dM_star).value, M_star.value)
             sf_red = Vred * trapz((phidM_red/dM_star).value, M_star.value)
-            #sf_stellar = Vred * trapz((phidM_stellar/dM_star).value, M_star.value)
             sf_wandering = Vred * trapz((phidM_wandering/dM_BH).value, M_BH.value)
             
             M_star_draw_blue = inv_transform_sampling((phidM_blue/dM_star).value, M_star_.value, survival=sf_blue)*u.Msun
             M_star_draw_red = inv_transform_sampling((phidM_red/dM_star).value, M_star_.value, survival=sf_red)*u.Msun
-            #M_star_draw_stellar = inv_transform_sampling((phidM_stellar/dM_star).value, M_star_.value, survival=sf_stellar)*u.Msun
             M_BH_draw_wandering = inv_transform_sampling((phidM_wandering/dM_BH).value, M_BH_.value, survival=sf_wandering)*u.Msun
             
             # Number of sources
-            #ndraw = len(M_BH_draw_wandering) + len(M_star_draw_blue) + len(M_star_draw_red)
             ndraw_gal = len(M_star_draw_blue) + len(M_star_draw_red)
             ndraw_wandering = len(M_BH_draw_wandering)
             ndraw = ndraw_gal + ndraw_wandering
             
             # Get stellar mass of wandering BHs (?)
-            #M_star_draw_wandering = np.full(ndraw_wandering, np.nan, dtype=dtype)*u.Msun
             M_star_draw_wandering = 10**((np.log10(M_BH_draw_wandering/M_SC_br) - alpha_SC[j])/beta_SC[j] + np.random.normal(0.0, 0.5, size=ndraw_wandering))*M_star_norm_SC
             # Red + blue + wandering population
             M_star_draw = np.concatenate([M_star_draw_wandering, M_star_draw_blue, M_star_draw_red])
             
-            print('log N galaxies: ', np.around(np.log10(len(M_star_draw)), 2))
-            print(np.around(np.log10(len(M_BH_draw_wandering)), 2), np.around(np.log10(len(M_star_draw_blue)), 2), np.around(np.log10(len(M_star_draw_red)), 2))
+            print('log N galaxies: ', np.around(np.log10(ndraw), 2))
+            print(np.around(np.log10(ndraw_wandering), 2), np.around(np.log10(len(M_star_draw_blue)), 2), np.around(np.log10(len(M_star_draw_red)), 2))
             
             mask_wandering = np.concatenate([np.full(ndraw_wandering, True),
                                            np.full(len(M_star_draw_blue), False),
@@ -924,13 +919,12 @@ class DemographicModel:
             mask_blue = np.concatenate([np.full(ndraw_wandering, False),
                                         np.full(len(M_star_draw_blue), True),
                                         np.full(len(M_star_draw_red), False)])
-            
-            #z_draw = z_draw[:ndraw] # I ??
-            
+                        
             if ndraw > ndraw_dim:
                 print("ndraw > ndraw_dim! Try increasing ndraw_dim.")
                 print('log ndraw: ', np.log10(ndraw))
                 print('log ndraw_dim: ', np.log10(ndraw_dim))
+                return
                 
             # Shuffle
             p = np.random.permutation(ndraw)
@@ -942,14 +936,9 @@ class DemographicModel:
             
             # Initialize arrays
             samples = {}
-            samples['M_star_draw'] = np.full(ndraw, np.nan, dtype=dtype)*u.Msun
-            samples['z_draw'] = np.full(ndraw, np.nan, dtype=dtype)
-            samples['M_BH_draw'] = np.full(ndraw, np.nan, dtype=dtype)*u.Msun
-            samples['lambda_draw'] = np.full(ndraw, np.nan, dtype=dtype)
-            samples['g-r'] = np.full(ndraw, np.nan, dtype=dtype)
-            samples['pop'] = np.full(ndraw, np.nan, dtype=np.int)
-                
+                            
             # Mask galaxy populations
+            samples['pop'] = np.full(ndraw, np.nan, dtype=np.int)
             samples['pop'][mask_wandering] = 2
             samples['pop'][mask_red] = 1
             samples['pop'][mask_blue] = 0
@@ -976,6 +965,7 @@ class DemographicModel:
             M_BH_draw[~mask_wandering] = 10**(alpha[j] + beta[j]*np.log10(M_star_draw[~mask_wandering]/M_star_br) +
                                             np.random.normal(0.0, 0.55, size=ndraw_gal))*M_BH_norm
             M_BH_draw[mask_wandering] = M_BH_draw_wandering
+            samples['M_BH_draw'] = M_BH_draw
             
             print('Sampling ERDF')
             
@@ -998,7 +988,7 @@ class DemographicModel:
                 lambda_draw_init = 10**np.random.normal(log_edd_mu, log_edd_sigma, ndraw)
                 lambda_draw = survival_sampling(lambda_draw_init, survival=p, fill_value=1e-8)
 
-            samples['lambda_draw'][:ndraw] = lambda_draw
+            samples['lambda_draw'] = lambda_draw
             hists['n_i_Edd'][j,:], _ = hist1d(lambda_draw, bins=lambda_)
             
             print('Sampling occupation probability')
@@ -1232,19 +1222,11 @@ class DemographicModel:
         L_bol_AGN = np.load(os.path.join(self.workdir, f'samples_L_draw_{seed}_{j}.npy'))*u.erg/u.s
         M_i_AGN = np.load(os.path.join(self.workdir, f'samples_M_i_{seed}_{j}.npy'))
 
-        #
-        #lambda_draw = np.load(os.path.join(self.workdir, f'samples_lambda_draw_{j}.npy'))
-
         # Initialize arrays
         samples = {}
         samples[f'm_{band}_{seed}'] = np.full(ndraw, np.nan)
-        #samples[f'm_host_{band}_{seed}'] = np.full(ndraw, np.nan)
         samples[f'SFinf_{band}_{seed}'] = np.full(ndraw, np.nan)
         samples[f'tau_RF_{band}_{seed}'] = np.full(ndraw, np.nan)
-        #samples[f'L_host_{band}_{seed}'] = np.full(ndraw, np.nan)*u.erg/u.s
-        #samples[f'std_{seed}'] = np.full(ndraw, np.nan)
-        #samples[f'sigvar_{seed}'] = np.full(ndraw, np.nan)
-        #samples[f'sigqso_{seed}'] = np.full(ndraw, np.nan)
 
         lambda_RF = lib[band].lpivot/(1 + z)
 
@@ -1345,7 +1327,6 @@ class DemographicModel:
 
         # Fluxes
         samples[f'm_{band}_{seed}'] = m_band
-        #samples[f'L_host_{band}_{seed}'] = L_band_host
 
         # Draw SF_\infty and tau (rest-frame)
         # In M10, M_i is basically a proxy for L_bol, so we need to use the Shen relation
@@ -1444,14 +1425,9 @@ class DemographicModel:
                 
                 SFinf, tau, z, m_band, mask = self.sample_SF_tau(j, seed, t_obs, pm_prec=pm_prec, band=band,
                                                                  SFinf_small=SFinf_small, m_5=m_5)
-                                
-                """
-                mask_small = (SFinf < pm_prec(m_band)) | (M_BH < 1e2*u.Msun) | (m_band > m_5+1)
-                """
                 
                 self.sample_light_curve(j, seed, SFinf, tau, z, m_band, mask, t_obs, pm_prec=pm_prec, dt_min=dt_min,
                                         band=band, SFinf_small=SFinf_small, m_5=m_5)
-                # j, seed, SFinf, tau, z, m_band, t_obs, mask_small,
                                 
         return
             
