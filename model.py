@@ -36,12 +36,17 @@ xspec.Xset.allowPrompting = False
 
 def pm_prec(mag, gamma=0.038, m_5=25.0, sigma_sys=0.003):
     """
+    Model for photometric precision of a survey following
+    https://ui.adsabs.harvard.edu/abs/2019ApJ...873..111I/abstract
     """
     x = 10**(0.4*(mag - m_5))
     sigma_rand = np.sqrt((0.04 - gamma)*x + gamma*x**2)
     return np.sqrt(sigma_sys**2 + sigma_rand**2)
 
 def hist1d(x, bins):
+    """
+    Wrapper for fast 1d histograms to mimic the numpy.histogram behavoir
+    """
     log_bins = np.log10(bins)
     log_x = np.log10(x[x>0])
     #return np.histogram(x, bins)
@@ -49,6 +54,10 @@ def hist1d(x, bins):
     return h, bins
 
 def f_host_model(z, M_star, seed=None):
+    """
+    Return aperture covering factor for a host galaxy given its redshift and stellar mass.
+    Model constructed from fitting fstar vs. Mstar in bins of log Mstar
+    """
     np.random.seed(seed)
     
     log_M_star = np.log10(M_star)
@@ -88,7 +97,10 @@ def f_host_model(z, M_star, seed=None):
 
 
 def k_corr(z, g_minus_r):
+    """
+    Approximate k-correction for host galaxies given redshift and g-r color
     # https://arxiv.org/pdf/1002.2360.pdf
+    """
     c = [[0,         0,        0,         0],
          [-0.900332, 3.97338,  0.774394, -1.09389],
          [3.65877,  -8.04213,  11.0321,   0.781176],
@@ -104,12 +116,8 @@ def g_minus_r_model(M_star, mu, cov, seed=None):
     """
     Sample host galaxy colors given stellar mass and 2D Gaussian PDF.
     Creates a grid of PDFs in stellar mass bins as an efficient approximation
-    
     https://jakevdp.github.io/PythonDataScienceHandbook/05.12-gaussian-mixtures.html
-
     """
-    
-    
     x_in = np.log10(M_star)
     
     rv = st.multivariate_normal(mean=mu, cov=cov)
@@ -143,14 +151,20 @@ def g_minus_r_model(M_star, mu, cov, seed=None):
     return g_minus_r_draws
     
 
-def g_minus_r_model_blue(M_stellar, seed=None):    
+def g_minus_r_model_blue(M_stellar, seed=None):
+    """
+    Draw g-r host galaxy colors for the blue/green galaxy population given stellar mass
+    """
     mu = np.array([8.9846321,  0.46562084])
     cov = np.array([[0.52527681, 0.06516369],
                    [0.06516369,  0.0229178]])
     return g_minus_r_model(M_stellar, mu, cov, seed=seed)
 
 
-def g_minus_r_model_red(M_stellar, seed=None):    
+def g_minus_r_model_red(M_stellar, seed=None):
+    """
+    Draw g-r host galaxy colors for the red galaxy population given stellar mass
+    """
     mu = np.array([9.77213478, 0.79589641])
     cov = np.array([[0.23671096, 0.0184602],
                     [0.0184602,  0.00646298]])
@@ -158,56 +172,39 @@ def g_minus_r_model_red(M_stellar, seed=None):
 
 
 def GSMF_blue(M_star, z):
+    """
+    Redshift-dependent galaxy stellar mass function of the blue+green galaxy population (single Schechter function)
+    assuming the ratio of the blue/red GSMF doesn't change with time (probably wrong)
+    """
     ratio = _GSMF_blue(M_star)/(_GSMF_red(M_star) + _GSMF_blue(M_star))
     return ratio * GSMF(M_star, z)
 
 
 def GSMF_red(M_star, z):
+    """
+    Redshift-dependent galaxy stellar mass function of the red galaxy population (single Schechter function)
+    assuming the ratio of the blue/red GSMF doesn't change with time (probably wrong)
+    """
     ratio = _GSMF_red(M_star)/(_GSMF_red(M_star) + _GSMF_blue(M_star))
     return ratio * GSMF(M_star, z)
 
-
-def GSMF_stellar(M_star, z):
-    # Currently only defined at z=0
-    alpha = 2.62
-    beta = 8.22
-    M_star_br = 10**7.83
-    M_BH = 10**(alpha + beta*np.log10(M_star/M_star_br))
-    return BHMF_wandering(M_BH) 
-
-
-def _BHMF_wandering(M_BH):
-    # Fig. 14 https://arxiv.org/pdf/2110.15607.pdf
-    # z=0
-    log_M_BH = np.log10(M_BH)
-    #dM = np.diff(M_BH)[0]*u.Msun
-    #dlog_M = np.diff(log_M_BH)[0]
-    # Read the digitized results from Fig. 14 z ~ 0
-    dat = np.loadtxt('BHMF_stellar.txt', delimiter=',')
-    _log_M_BH = dat[:,0]
-    #_dlog_M_BH = np.diff(_log_M_BH)[0]
-    _log_phi = dat[:,1]
-    # Interpolate to M_BH
-    log_phi = interp1d(_log_M_BH, _log_phi, fill_value='extrapolate')
-    phi = 10**(log_phi(log_M_BH) + np.random.normal(0.0, 0.5, size=len(log_M_BH)))*u.Mpc**-3
-    # Convert log M_BH to log M_star
-    #phi = phi * dlog_M_BH / dlog_M_stellar
-    return phi
-
-
 def BHMF_wandering(M_BH):
     """
-    Anchored to # Fig. 14 https://arxiv.org/pdf/2110.15607.pdf
+    Black hole mass function (BHMF) anchored to LIGO/VIRGO GW merger rates below 10^2 Msun
+    Fig. 14 of https://ui.adsabs.harvard.edu/abs/2022ApJ...924...56S/abstract
+    Low-mass end of the Schechter function is anchored to 10^4 Msun
     """
-    phi = 10**np.random.normal(5, 0.3)
-    M_BH_br = 1e5
+    phi_ = 10**np.random.normal(-1, 0.3)
+    M_BH_br = 1e4
     alpha = -1.5
-    phi = np.exp(-M_BH/M_BH_br)/M_BH_br * phi*(M_BH/M_BH_br)**alpha
-    return phi
-
+    phidM = phi_*(M_BH/M_BH_br)**alpha
+    return phidM
 
 def _GSMF_blue(M_star):
-    # z=0
+    """
+    Galaxy stellar mass function of the z ~ 0 blue+green galaxy population (single Schechter function)
+    https://ui.adsabs.harvard.edu/abs/2012MNRAS.421..621B/abstract
+    """
     M_br = 10**10.72
     phi = 0.71*1e-3
     alpha = -1.45
@@ -216,7 +213,10 @@ def _GSMF_blue(M_star):
 
 
 def _GSMF_red(M_star):
-    # z=0
+    """
+    Galaxy stellar mass function of the z ~ 0 red galaxy population (double Schechter function)
+    https://ui.adsabs.harvard.edu/abs/2012MNRAS.421..621B/abstract
+    """
     M_br = 10**10.72
     phi1 = 3.25*1e-3
     phi2 = 0.08*1e-3
@@ -227,9 +227,12 @@ def _GSMF_red(M_star):
 
 
 def GSMF(M_star, z, seed=None):
-    # z<0.1  Use GAMA GSMF https://ui.adsabs.harvard.edu/abs/2012MNRAS.421..621B/abstract
-    # Else, use https://ui.adsabs.harvard.edu/abs/2021MNRAS.506.4933A/abstract
-    
+    """
+    Galaxy stellar mass function with redshift evolution (double Schechter function)
+    https://ui.adsabs.harvard.edu/abs/2021MNRAS.506.4933A/abstract
+    If z < 0.1, use GAMA GSMF: https://ui.adsabs.harvard.edu/abs/2012MNRAS.421..621B/abstract
+    which is better-constrained in the dwarf galaxy regime
+    """
     # Best-fitting values
     logM_brs = np.array([10.78, 10.71, 10.89, 10.83, 10.86, 10.83, 10.67, 10.60, 10.66, 10.66])
     logphi1s = np.array([np.log10(2.96*1e-3), -2.61, -2.76, -2.60, -2.71, -2.68, -2.75, -2.87, -2.84, -3.19])
@@ -269,7 +272,10 @@ def GSMF(M_star, z, seed=None):
         
 
 def calc_sigma_var(mag, magerr):
-    
+    """
+    Fast code variability significance of N light curves of length len
+    given array of mag and magerr with shape [N, len]
+    """
     N = np.shape(mag)[0] # Number of light curves
     nu = np.shape(mag)[1] - 1
     
@@ -365,9 +371,7 @@ def get_RIAF_flux(model_sed, M_BH=1e6, lambda_Edd=1e-4, z=0.01, M_BH_template=4e
     gamma: adiabatic index [do not recommend changing]
     theta: inclination angle [deg]
     """
-    
-    # TODO: Add z template and put M, lambda into par filename
-    
+        
     # Vectorization
     wav, riaf_sed_path = model_sed['wav'], model_sed['dir']
     
@@ -752,9 +756,8 @@ class DemographicModel:
     def sample(self, nbins=10, nbootstrap=50, eta=1e4, zmax=0.1, ndraw_dim=1e7, omega=4*np.pi,
                seed_dict={'light':(lambda x: np.ones_like(x)), 'heavy':f_occ_heavyMS, 'light_stellar':(lambda x: np.ones_like(x))},
                ERDF_mode=0, log_edd_mu=-1, log_edd_sigma=0.2):
-        
         """
-        See https://iopscience.iop.org/article/10.3847/1538-4357/aa803b/pdf
+        Methodology roughly follows https://ui.adsabs.harvard.edu/abs/2017ApJ...845..134W/abstract
 
         nbins: Number of stellar mass bins 
         nbootstrap: Number of bootstrap samples (for observational uncertainties)
@@ -767,10 +770,7 @@ class DemographicModel:
         ERDF_mode: Which ERDF to adopt
             0 = Weigel 2017
             1 = active fraction
-        """
-        
-        #etas = 
-        
+        """        
         pars = {'nbins':nbins, 'nbootstrap':nbootstrap, 'eta':eta}
         workdir = self.workdir
         
@@ -869,9 +869,7 @@ class DemographicModel:
             
         # Bootstrap loop
         for j in tqdm(range(nbootstrap)):
-            
-            # Doing this for all seed scenarios to save memory
-            
+                        
             # Set random seed
             np.random.seed(j)
 
@@ -882,7 +880,7 @@ class DemographicModel:
             phidM_blue = GSMF_blue(M_star.value, z_draw)*dM_star
             phidM_red = GSMF_red(M_star.value, z_draw)*dM_star
             if '_stellar' in seed.lower():
-                phidM_wandering = BHMF_wandering(M_BH.value)*dM_BH
+                phidM_wandering = BHMF_wandering(M_BH.value)
             else:
                 phidM_wandering = np.zeros_like(M_BH.value)
                         
@@ -1130,9 +1128,7 @@ class DemographicModel:
             M_i_model = np.concatenate([M_i_model_RIAF, M_i_model_AGN], axis=1)
             nuf_nu = np.concatenate([nuf_nu_RIAF, nuf_nu_AGN], axis=1)
             y = np.concatenate([y_riaf, y_agn])
-                            
-        #self.samples[f'L_{band}_model'] = L_band_model*u.erg/u.s # Shape NxNxN
-        #self.samples['M_i_model'] = M_i_model # Shape NxNxN
+
                 
         # Create interpolator objects
         fn_L_band_model = RegularGridInterpolator((np.log10(x), np.log10(y), z), np.log10(L_band_model),
