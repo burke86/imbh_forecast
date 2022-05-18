@@ -112,44 +112,41 @@ def k_corr(z, g_minus_r):
     return K
 
 
-def g_minus_r_model(M_star, mu, cov, seed=None):
+def g_minus_r_model(M_star, mu, cov, seed=None, len_chunk=None):
     """
     Sample host galaxy colors given stellar mass and 2D Gaussian PDF.
     Creates a grid of PDFs in stellar mass bins as an efficient approximation
     https://jakevdp.github.io/PythonDataScienceHandbook/05.12-gaussian-mixtures.html
-    """
-    x_in = np.log10(M_star)
-    
+    https://peterroelants.github.io/posts/multivariate-normal-primer/
+    """    
     rv = st.multivariate_normal(mean=mu, cov=cov)
-    
+    A = cov[0,0]
+    B = cov[1,1]
+    C = cov[0,1]
+        
     # Sample from the PDF
     y = np.linspace(-2, 2, 50) # Range for colors
     x_in_grid_ = np.linspace(4, 12, 20) # Range for stellar mass
     dx = np.diff(x_in_grid_)
     x_in_grid = x_in_grid_[1:] + dx/2 # bin centers
     
-    # Create grid of PDFs instead of evaluating at each x_in to speed-up    
-    pdf_grid = np.zeros([len(x_in_grid), len(y)])
+    # Digitize log M_star
+    idx_bin = np.searchsorted(x_in_grid_[1:], np.log10(M_star), side='left')
+        
+    # Create grid of PDFs instead of evaluating at each M_star to speed-up
+    g_minus_r_draws = np.empty(len(M_star))
+    
+    cov_ygivenx = B - (C * (1/A) * C)
+    mus_ygivenx = mu[1] + (C * (1/A) * (x_in_grid - mu[0]))
     for i, x_i in enumerate(x_in_grid):
-        x = np.full_like(y, x_i)
-        pdf = rv.pdf(x=np.array([x,y]).T)
-        pdf_grid[i] = pdf/np.sum(pdf)
-        #plt.plot(y, pdf_grid[i])
-    
-    # Sample from the PDF in each bin
-    idx_bin = np.digitize(x_in, bins=x_in_grid_[1:])
-    # Vectorize np.random.choice
-    # https://stackoverflow.com/questions/47722005/
-    p = pdf_grid[idx_bin]
-    idx_draws = (p.cumsum(1) > np.random.rand(p.shape[0])[:,None]).argmax(1)
-    g_minus_r_draws = y[idx_draws]
-            
-    # TODO: K-correction
-    # This is the galaxy color at ~0.1
-    # Now correct it using https://iopscience.iop.org/article/10.1086/510127/pdf
-    # to get new g mag
-    
+        # Conditional probability distribution function p(y|x=M_star)
+        rv = st.norm(loc=mus_ygivenx[i], scale=np.sqrt(cov_ygivenx))
+        mask = (idx_bin==i)
+        g_minus_r_draws[mask] = rv.rvs(size=np.count_nonzero(mask))
+        
     return g_minus_r_draws
+        
+    # Use instead https://peterroelants.github.io/posts/multivariate-normal-primer/
     
 
 def g_minus_r_model_blue(M_stellar, seed=None):
@@ -197,7 +194,7 @@ def BHMF_wandering(M_BH):
     """
     phi_ = 10**np.random.normal(-1, 0.3)
     M_BH_br = 1e4
-    alpha = -1.7
+    alpha = -1.6
     phidM = phi_*(M_BH/M_BH_br)**alpha
     return phidM
 
@@ -939,9 +936,7 @@ class DemographicModel:
             # Host galaxy colors 
             g_minus_r_draw = np.full(ndraw, np.nan)
             g_minus_r_draw[mask_red] = g_minus_r_model_red(M_star_draw[mask_red].value, seed=j)
-            # Assume blue colors for stellar channels
-            #g_minus_r_draw[mask_wandering] = g_minus_r_model_blue(M_star_draw[mask_wandering].value, seed=j)
-            #g_minus_r_draw[mask_blue] = g_minus_r_model_blue(M_star_draw[mask_blue].value, seed=j)
+            # Assume blue "host star cluster" colors for wanderers
             g_minus_r_draw[mask_blue | mask_wandering] = g_minus_r_model_blue(M_star_draw[mask_blue | mask_wandering].value, seed=j)
             samples['g-r'] = g_minus_r_draw
             
