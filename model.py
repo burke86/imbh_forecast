@@ -123,11 +123,12 @@ def g_minus_r_model(M_star, mu, cov, seed=None):
     rv = st.multivariate_normal(mean=mu, cov=cov)
     
     # Sample from the PDF
-    y = np.linspace(-2, 2, 100) # Range for colors
-    x_in_grid = np.linspace(4, 12, 20) # Range for stellar mass
+    y = np.linspace(-2, 2, 50) # Range for colors
+    x_in_grid_ = np.linspace(4, 12, 20) # Range for stellar mass
+    dx = np.diff(x_in_grid_)
+    x_in_grid = x_in_grid_[1:] + dx/2 # bin centers
     
     # Create grid of PDFs instead of evaluating at each x_in to speed-up    
-    g_minus_r_draws = np.full(len(x_in), np.nan)
     pdf_grid = np.zeros([len(x_in_grid), len(y)])
     for i, x_i in enumerate(x_in_grid):
         x = np.full_like(y, x_i)
@@ -136,7 +137,7 @@ def g_minus_r_model(M_star, mu, cov, seed=None):
         #plt.plot(y, pdf_grid[i])
     
     # Sample from the PDF in each bin
-    idx_bin = np.digitize(x_in, bins=x_in_grid)
+    idx_bin = np.digitize(x_in, bins=x_in_grid_[1:])
     # Vectorize np.random.choice
     # https://stackoverflow.com/questions/47722005/
     p = pdf_grid[idx_bin]
@@ -196,7 +197,7 @@ def BHMF_wandering(M_BH):
     """
     phi_ = 10**np.random.normal(-1, 0.3)
     M_BH_br = 1e4
-    alpha = -1.5
+    alpha = -1.7
     phidM = phi_*(M_BH/M_BH_br)**alpha
     return phidM
 
@@ -269,34 +270,6 @@ def GSMF(M_star, z, seed=None):
     phi = np.exp(-M_star/M_br)/M_br * (phi1*(M_star/M_br)**alpha1 + phi2*(M_star/M_br)**alpha2)
     
     return np.average(phi, axis=1, weights=wt)
-        
-
-def calc_sigma_var(mag, magerr):
-    """
-    Fast code variability significance of N light curves of length len
-    given array of mag and magerr with shape [N, len]
-    """
-    N = np.shape(mag)[0] # Number of light curves
-    nu = np.shape(mag)[1] - 1
-    
-    wt = 1/magerr**2
-    m0 = np.sum(mag*wt, axis=1)/np.sum(wt, axis=1)
-    m0 = np.array([m0]*(nu+1)).T # Reshape
-        
-    chisq = 1/nu*np.sum((mag - m0)**2*wt, axis=1)
-    
-    p = st.chi2.sf(chisq, nu) #1 - cdf
-    
-    log_p = np.log(p)
-    
-    sigma_var = np.zeros_like(p)
-    
-    mask_small = (log_p > -36)
-    
-    sigma_var[mask_small] = st.norm.ppf(1 - p[mask_small]/2)
-    sigma_var[~mask_small] = np.sqrt(np.log(2/np.pi) - 2*np.log(8.2) - 2*log_p[~mask_small])
-    
-    return sigma_var
 
 
 def f_occ_Bellovary19(M_star):
@@ -505,7 +478,9 @@ def get_RIAF_flux(model_sed, M_BH=1e6, lambda_Edd=1e-4, z=0.01, M_BH_template=4e
 
 
 def get_AGN_flux(model_sed, M_BH=1e6, lambda_Edd=0.1, z=0.01, spin=0, r_corr=100, alpha=0.3, kT_e=0.23, tau=11, gamma=2.2, f_pl=0.05, band='SDSS_g'):
-    
+    """
+    Compute flux from AGN SED using the Done+12 xspec model
+    """
     bandpass = lib[band]
     # Input redshift
     d_L = cosmo.luminosity_distance(z).to(u.cm)
@@ -556,7 +531,9 @@ def get_AGN_flux(model_sed, M_BH=1e6, lambda_Edd=0.1, z=0.01, spin=0, r_corr=100
 
 
 def lambda_obs(L_bol, seed=None, randomize=True):
-    
+    """
+    Compute the luminosity-dependent optically-obscured AGN fraction at L_bol
+    """
     np.random.seed(seed)
     L_bol = (L_bol*u.erg/u.s).to(u.Lsun)
     
@@ -594,6 +571,9 @@ def lambda_obs(L_bol, seed=None, randomize=True):
 
 @njit
 def drw(t_obs, x, xmean, SFinf, E, N):
+    """
+    Generate damped random walk on grid
+    """
     for i in range(1, N):
         dt = t_obs[i,:] - t_obs[i - 1,:]
         x[i,:] = (x[i - 1,:] - dt * (x[i - 1,:] - xmean) + np.sqrt(2) * SFinf * E[i,:] * np.sqrt(dt))
@@ -601,32 +581,15 @@ def drw(t_obs, x, xmean, SFinf, E, N):
 
 
 def simulate_drw(t_rest, tau=300., z=2.0, xmean=0, SFinf=0.3):
-
+    """
+    Simulate damped random walk on grid given tau, SF
+    """
     N = np.shape(t_rest)[0]
     ndraw = len(tau)
     
     # t_rest [N, ndraw]
 
     t_obs = t_rest * (1. + z) / tau
-    
-    x = np.zeros((N, ndraw))
-    x[0,:] = np.random.normal(xmean, SFinf)
-    E = np.random.normal(0, 1, (N, ndraw))
-    
-    return drw(t_obs, x, xmean, SFinf, E, N)
-
-
-def simulate_drw_bin(t_rest, tau=300., z=2.0, xmean=0, SFinf=0.3):
-
-    N = np.shape(t_rest)[0]
-    ndraw = len(tau)
-    
-    # t_rest [N, ndraw]
-
-    t_obs = t_rest * (1. + z) / tau
-    
-    # bin SFinf and tau
-    #st.binned_statistic_2d(SFinf, tau)
     
     x = np.zeros((N, ndraw))
     x[0,:] = np.random.normal(xmean, SFinf)
@@ -636,6 +599,9 @@ def simulate_drw_bin(t_rest, tau=300., z=2.0, xmean=0, SFinf=0.3):
 
 
 def draw_SFinf(lambda_RF, M_i, M_BH, size=1, randomize=True):
+    """
+    Get SF_\infty given AGN parameters
+    """
     if randomize:
         A = np.random.normal(-0.479, 0.008, size=size)
         B = np.random.normal(-0.479, 0.005, size=size)
@@ -655,7 +621,9 @@ def draw_SFinf(lambda_RF, M_i, M_BH, size=1, randomize=True):
 
 
 def draw_tau(lambda_RF, M_i, M_BH, size=1, randomize=True):
-    # tau
+    """
+    Get tau given AGN parameters
+    """
     if randomize:
         A = np.random.normal(2.0, 0.01, size=size)
         B = np.random.normal(0.17, 0.02, size=size)
@@ -676,8 +644,11 @@ def draw_tau(lambda_RF, M_i, M_BH, size=1, randomize=True):
 
 
 def inv_transform_sampling(y, x, n_samples=1000, survival=False):
-    # https://tmramalho.github.io/blog/2013/12/16/how-to-do-inverse-transformation-sampling-in-scipy-and-numpy/
-    # https://en.wikipedia.org/wiki/Inverse_transform_sampling
+    """
+    Perform inverse transform sampling on curve y(x)
+    https://tmramalho.github.io/blog/2013/12/16/how-to-do-inverse-transformation-sampling-in-scipy-and-numpy/
+    https://en.wikipedia.org/wiki/Inverse_transform_sampling
+    """
     dx = np.diff(x)
     cum_values = np.zeros(x.shape)
     cum_values[1:] = np.cumsum(y*dx)/np.sum(y*dx)
@@ -690,6 +661,9 @@ def inv_transform_sampling(y, x, n_samples=1000, survival=False):
 
 
 def survival_sampling(y, survival, fill_value=np.nan):
+    """
+    Perform survival sampling on curve y given survival fraction
+    """
     # Can't randomly sample, will muck up indicies
     n_samples = len(y)
     randp = np.random.rand(n_samples)
@@ -699,6 +673,10 @@ def survival_sampling(y, survival, fill_value=np.nan):
     return y_survive
 
 def calcsigvar(data, error, sys_err=0.0):
+    """
+    Fast code variability significance of N light curves of length len
+    given array of mag and magerr with shape [N, len]
+    """
     
     # reshape data
     data = data.T
@@ -718,8 +696,9 @@ def calcsigvar(data, error, sys_err=0.0):
 
 
 class DemographicModel:
-
-    
+    """
+    Class containing methods to run model
+    """
     def __init__(self, survey='lsst', workdir='work', load=False):
         # argument for input of multiple occupation fractions
         self.pars = {}
@@ -732,12 +711,18 @@ class DemographicModel:
     
                       
     def save(self, survey='lsst'):
+        """
+        Save parameter data to disk
+        """
         with open(os.path.join(self.workdir, f'pars_{survey}.pkl'), 'wb') as f:
             pickle.dump(self.pars, f)
         return
     
     
     def save_samples(self, samples, j):
+        """
+        Save array of samples to disk
+        """
         for key in samples.keys():
             s = samples[key]
             if isinstance(s, u.quantity.Quantity):
@@ -746,6 +731,9 @@ class DemographicModel:
                 
         
     def load_sample(self, name='z_draw', seed=None, j=0):
+        """
+        Load array of samples into memory
+        """
         if seed is None:
             data = np.load(os.path.join(self.workdir, f'samples_{name}_{j}.npy'))
         else:
@@ -952,10 +940,9 @@ class DemographicModel:
             g_minus_r_draw = np.full(ndraw, np.nan)
             g_minus_r_draw[mask_red] = g_minus_r_model_red(M_star_draw[mask_red].value, seed=j)
             # Assume blue colors for stellar channels
-            if '_stellar' in seed.lower():
-                g_minus_r_draw[mask_wandering] = g_minus_r_model_blue(M_star_draw[mask_wandering].value, seed=j)
-            #else:
-            g_minus_r_draw[mask_blue] = g_minus_r_model_blue(M_star_draw[mask_blue].value, seed=j)
+            #g_minus_r_draw[mask_wandering] = g_minus_r_model_blue(M_star_draw[mask_wandering].value, seed=j)
+            #g_minus_r_draw[mask_blue] = g_minus_r_model_blue(M_star_draw[mask_blue].value, seed=j)
+            g_minus_r_draw[mask_blue | mask_wandering] = g_minus_r_model_blue(M_star_draw[mask_blue | mask_wandering].value, seed=j)
             samples['g-r'] = g_minus_r_draw
             
             # Host galaxy stellar mass
@@ -973,14 +960,14 @@ class DemographicModel:
                 # Blue  
                 xi_blue = ERDF_blue(pars['lambda_Edd']) # dN / dlog lambda
                 xi_red = ERDF_red(pars['lambda_Edd']) # dN / dlog lambda
-                xi_stellar = ERDF_red(pars['lambda_Edd']) # Assume these are radiatively inefficient ERDF
-                norm = trapz(xi_blue + xi_red + xi_stellar, pars['lambda_Edd'])
+                xi_wandering = ERDF_red(pars['lambda_Edd']) # Assume these are radiatively inefficient ERDF
+                norm = trapz(xi_blue + xi_red + xi_wandering, pars['lambda_Edd'])
                 xi_blue = xi_blue/norm
                 xi_red = xi_red/norm
-                xi_stellar = xi_stellar/norm
+                xi_wandering = xi_wandering/norm
                 lambda_draw[mask_blue] = inv_transform_sampling(xi_blue/dlambda, lambda_, np.count_nonzero(mask_blue))
                 lambda_draw[mask_red] = inv_transform_sampling(xi_red/dlambda, lambda_, np.count_nonzero(mask_red))
-                lambda_draw[mask_wandering] = inv_transform_sampling(xi_stellar/dlambda, lambda_, np.count_nonzero(mask_wandering))
+                lambda_draw[mask_wandering] = inv_transform_sampling(xi_wandering/dlambda, lambda_, np.count_nonzero(mask_wandering))
             elif ERDF_mode == 1:
                 p = lambda_A(M_star_draw.value)
                 lambda_draw_init = 10**np.random.normal(log_edd_mu, log_edd_sigma, ndraw)
