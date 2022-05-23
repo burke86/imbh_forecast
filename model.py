@@ -597,7 +597,7 @@ def drw(t_obs, x, tau, SFinf, E, N):
     for i in range(1, N):
         dt = t_obs[i,:] - t_obs[i - 1,:]
         #x[i,:] = (x[i - 1,:] - dt * (x[i - 1,:] - xmean) + np.sqrt(2) * SFinf * E[i,:] * np.sqrt(dt))
-        x[i] = (x[i - 1] * np.exp(-dt[i - 1] / tau) + SFinf * np.sqrt(1 - np.exp(-2 * dt[i - 1] / tau)) * E[i])
+        x[i] = (x[i - 1] * np.exp(-dt / tau) + SFinf * np.sqrt(1 - np.exp(-2 * dt / tau)) * E[i])
     return x
 
 
@@ -1177,10 +1177,17 @@ class DemographicModel:
                 samples[f'L_{band}_{seed}'] = np.full(ndraw, 0.0)*u.erg/u.s
                 samples[f'M_i_{seed}'] = np.full(ndraw, np.nan)
                 
+                """
                 L_draw_seed = np.load(os.path.join(self.workdir, f'samples_L_draw_{seed}_{j}.npy'))*u.erg/u.s
                 M_BH_draw_seed = np.load(os.path.join(self.workdir, f'samples_M_BH_draw_{seed}_{j}.npy'))*u.Msun
                 lambda_draw = np.load(os.path.join(self.workdir, f'samples_lambda_draw_{j}.npy'))
                 z_draw = np.load(os.path.join(self.workdir, f'samples_z_draw_{j}.npy'))
+                """
+                
+                L_draw_seed = self.load_sample(f'L_draw', seed, j=j)*u.erg/u.s
+                M_BH_draw_seed = self.load_sample(f'M_BH_draw', seed, j=j)*u.Msun
+                lambda_draw = self.load_sample(f'lambda_draw', j=j)
+                z_draw = self.load_sample(f'z_draw', j=j)
                 
                 mask_occ = M_BH_draw_seed.value > 0.0
                 
@@ -1236,7 +1243,8 @@ class DemographicModel:
         ndraw = int(ndraws[j])
         workdir = self.workdir
 
-        # Load arrays
+        # Load samples
+        """
         z = np.load(os.path.join(self.workdir, f'samples_z_draw_{j}.npy'))
         M_BH = np.load(os.path.join(self.workdir, f'samples_M_BH_draw_{seed}_{j}.npy'))*u.Msun
         M_star = np.load(os.path.join(self.workdir, f'samples_M_star_draw_{j}.npy'))*u.Msun
@@ -1244,13 +1252,18 @@ class DemographicModel:
         L_band_AGN = np.load(os.path.join(self.workdir, f'samples_L_{band}_{seed}_{j}.npy'))*u.erg/u.s
         L_bol_AGN = np.load(os.path.join(self.workdir, f'samples_L_draw_{seed}_{j}.npy'))*u.erg/u.s
         M_i_AGN = np.load(os.path.join(self.workdir, f'samples_M_i_{seed}_{j}.npy'))
+        """
+        z = self.load_sample(f'z_draw', j=j)
+        M_BH = self.load_sample(f'M_BH_draw', seed, j=j)*u.Msun
+        M_star = self.load_sample(f'M_star_draw', j=j)*u.Msun
+        g_minus_r = self.load_sample(f'g-r', j=j)
+        L_band_AGN = self.load_sample(f'L_{band}', seed, j=j)*u.erg/u.s
+        L_bol_AGN = self.load_sample(f'L_draw', seed, j=j)*u.erg/u.s
+        M_i_AGN = self.load_sample(f'M_i', seed, j=j)
         pop = self.load_sample(f'pop', j=j)
 
         # Initialize arrays
         samples = {}
-        #samples[f'm_{band}_{seed}'] = np.full(ndraw, np.nan)
-        #samples[f'SFinf_{band}_{seed}'] = np.full(ndraw, np.nan)
-        #samples[f'tau_RF_{band}_{seed}'] = np.full(ndraw, np.nan)
 
         lambda_RF = lib[band].lpivot/(1 + z)
 
@@ -1436,10 +1449,6 @@ class DemographicModel:
     def sample_light_curves(self, t_obs, pm_prec=pm_prec, dt_min=10, band='SDSS_g', SFinf_small=1e-8, m_5=25.0):
         
         pars = self.pars
-        workdir = self.workdir
-        ndraws = pars['ndraws']
-        
-        ndraw_dim = int(np.max(pars['ndraws']))
         nbootstrap = pars['nbootstrap']
         
         pars['lc_t_obs'] = t_obs
