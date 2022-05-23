@@ -17,6 +17,10 @@ from astropy.io import fits
 from fast_histogram import histogram1d
 from qsofit import qso_fit
 
+import jax
+import jax.numpy as jnp
+from tinygp import kernels, GaussianProcess
+
 import matplotlib.pyplot as plt
 from labellines import labelLine, labelLines
 from tqdm.notebook import tqdm
@@ -33,6 +37,25 @@ lib = pyphot.get_library()
 
 # https://heasarc.gsfc.nasa.gov/xanadu/xspec/manual/node205.html#optxagnf
 xspec.Xset.allowPrompting = False
+
+def set_mpl_style(fsize=15, tsize=18, tdir='in', major=5.0, minor=3.0, lwidth=1.8, lhandle=2.0):
+    
+    """Function to set MPL style"""
+
+    plt.style.use('default')
+    plt.rcParams['text.usetex'] = False
+    plt.rcParams['font.size'] = fsize
+    plt.rcParams['legend.fontsize'] = tsize
+    plt.rcParams['xtick.direction'] = tdir
+    plt.rcParams['ytick.direction'] = tdir
+    plt.rcParams['xtick.major.size'] = major
+    plt.rcParams['xtick.minor.size'] = minor
+    plt.rcParams['ytick.major.size'] = 5.0
+    plt.rcParams['ytick.minor.size'] = 3.0
+    plt.rcParams['axes.linewidth'] = lwidth
+    plt.rcParams['legend.handlelength'] = lhandle
+    
+    return
 
 def pm_prec(mag, gamma=0.038, m_5=25.0, sigma_sys=0.003):
     """
@@ -112,7 +135,7 @@ def k_corr(z, g_minus_r):
     return K
 
 
-def g_minus_r_model(M_star, mu, cov, seed=None, len_chunk=None):
+def g_minus_r_model(M_star, mu, cov, seed=None):
     """
     Sample host galaxy colors given stellar mass and 2D Gaussian PDF.
     Creates a grid of PDFs in stellar mass bins as an efficient approximation
@@ -146,8 +169,6 @@ def g_minus_r_model(M_star, mu, cov, seed=None, len_chunk=None):
         
     return g_minus_r_draws
         
-    # Use instead https://peterroelants.github.io/posts/multivariate-normal-primer/
-    
 
 def g_minus_r_model_blue(M_stellar, seed=None):
     """
@@ -296,6 +317,7 @@ def lambda_A(M_star):
 def ERDF_blue(lambda_Edd, xi=10**-1.65, seed=None):
     """
     ERDF for blue galaxies (radiatively-efficient, less massive)
+    Note Caplar+18 found delta_1 = -0.45 was
     """
     # Lbr = 10**38.1 lambda_br M_BH_br
     # 10^41.67 = 10^38.1 * 10^x * 10^10.66
@@ -567,13 +589,15 @@ def lambda_obs(L_bol, seed=None, randomize=True):
 
 
 @njit
-def drw(t_obs, x, xmean, SFinf, E, N):
+def drw(t_obs, x, tau, SFinf, E, N):
     """
-    Generate damped random walk on grid
+    Generate damped random walk on grid t_obs
     """
+    #dt = np.diff(t_obs)
     for i in range(1, N):
         dt = t_obs[i,:] - t_obs[i - 1,:]
-        x[i,:] = (x[i - 1,:] - dt * (x[i - 1,:] - xmean) + np.sqrt(2) * SFinf * E[i,:] * np.sqrt(dt))
+        #x[i,:] = (x[i - 1,:] - dt * (x[i - 1,:] - xmean) + np.sqrt(2) * SFinf * E[i,:] * np.sqrt(dt))
+        x[i] = (x[i - 1] * np.exp(-dt[i - 1] / tau) + SFinf * np.sqrt(1 - np.exp(-2 * dt[i - 1] / tau)) * E[i])
     return x
 
 
@@ -584,15 +608,18 @@ def simulate_drw(t_rest, tau=300., z=2.0, xmean=0, SFinf=0.3):
     N = np.shape(t_rest)[0]
     ndraw = len(tau)
     
-    # t_rest [N, ndraw]
+    # t_rest shape is [N, ndraw]
 
     t_obs = t_rest * (1. + z) / tau
     
     x = np.zeros((N, ndraw))
-    x[0,:] = np.random.normal(xmean, SFinf)
+    #x[0,:] = np.random.normal(xmean, SFinf)
     E = np.random.normal(0, 1, (N, ndraw))
+    x[0,:] = E[0,:] * SFinf
     
-    return drw(t_obs, x, xmean, SFinf, E, N)
+    #drw_jit = jax.jit(drw)
+    lc = drw(t_obs, x, tau, SFinf, E, N) + xmean
+    return lc
 
 
 def draw_SFinf(lambda_RF, M_i, M_BH, size=1, randomize=True):
@@ -669,6 +696,7 @@ def survival_sampling(y, survival, fill_value=np.nan):
     y_survive[mask_rand] = y[mask_rand]
     return y_survive
 
+
 def calcsigvar(data, error, sys_err=0.0):
     """
     Fast code variability significance of N light curves of length len
@@ -706,7 +734,7 @@ class DemographicModel:
                 self.pars = pickle.load(f)
         return
     
-                      
+    
     def save(self, survey='lsst'):
         """
         Save parameter data to disk
@@ -725,8 +753,8 @@ class DemographicModel:
             if isinstance(s, u.quantity.Quantity):
                 s = s.value
             np.save(os.path.join(self.workdir, f'samples_{key}_{j}'), s)
-                
-        
+    
+    
     def load_sample(self, name='z_draw', seed=None, j=0):
         """
         Load array of samples into memory
@@ -736,9 +764,9 @@ class DemographicModel:
         else:
             data = np.load(os.path.join(self.workdir, f'samples_{name}_{seed}_{j}.npy'))
         return data
-        
+    
 
-    def sample(self, nbins=10, nbootstrap=50, eta=1e4, zmax=0.1, ndraw_dim=1e7, omega=4*np.pi,
+    def sample(self, nbins=20, nbootstrap=16, eta=100, zmax=0.1, ndraw_dim=1e9, omega=4*np.pi,
                seed_dict={'light':(lambda x: np.ones_like(x)), 'heavy':f_occ_heavyMS, 'light_stellar':(lambda x: np.ones_like(x))},
                ERDF_mode=0, log_edd_mu=-1, log_edd_sigma=0.2):
         """
@@ -799,7 +827,7 @@ class DemographicModel:
         beta_SC = np.random.normal(loc=2.62, scale=0.42, size=nbootstrap)
         M_SC_br = 10**7.83*u.Msun
         M_star_norm_SC = 1*u.Msun
-
+        
         # Stellar Mass Function
         M_star_ = np.logspace(pars['log_M_star_min'], pars['log_M_star_max'], nbins+1, dtype=dtype)*u.Msun
         dM_star = np.diff(M_star_)
@@ -826,6 +854,7 @@ class DemographicModel:
         dlogM_BH = np.diff(np.log10(M_BH_.value))
         M_BH = M_BH_[1:] + dM_BH/2 # bins
         pars['M_BH'] = M_BH
+        pars['M_BH_'] = M_BH_
         
         print('log M_BH bins: ', np.around(np.log10(pars['M_BH'].value), 2))
 
@@ -833,7 +862,9 @@ class DemographicModel:
         lambda_ = np.logspace(pars['log_lambda_min'], pars['log_lambda_max'], nbins+1, dtype=dtype)
         dlambda = np.diff(lambda_)
         dloglambda = np.diff(np.log10(lambda_))
-        pars['lambda_Edd'] = lambda_[1:] + dlambda/2 # bins
+        lambda_Edd = lambda_[1:] + dlambda/2
+        pars['lambda_Edd'] = lambda_Edd # bins
+        pars['lambda_Edd_'] = lambda_
         
         print('log lambda bins: ', np.around(np.log10(pars['lambda_Edd']), 2))
 
@@ -842,6 +873,7 @@ class DemographicModel:
         dL = np.diff(L_)
         dlogL = np.diff(np.log10(L_.value))
         pars['L'] = L_[1:] + dL/2 # bins
+        pars['L_'] = L_
         
         hists = {}
         # Number densities
@@ -868,7 +900,17 @@ class DemographicModel:
                 phidM_wandering = BHMF_wandering(M_BH.value)
             else:
                 phidM_wandering = np.zeros_like(M_BH.value)
-                        
+                
+            """
+            if method == 'convolve':
+                
+                l = np.log10(L.value)
+                # Put the analytic solution here
+                phi_L = np.convolve(phi_L_log_lambda_0(l), ERDF_blue(lambda_Edd))
+                
+            else: # Monte Carlo sampling
+            """
+            
             # phi = dn / dlog M  = dN / dV / dlog M
             # Normalize
             Vred = V.to(u.Mpc**3).value / eta # Reduced comoving volume
@@ -885,13 +927,16 @@ class DemographicModel:
             ndraw_wandering = len(M_BH_draw_wandering)
             ndraw = ndraw_gal + ndraw_wandering
             
-            # Get stellar mass of wandering BHs (?)
-            M_star_draw_wandering = 10**((np.log10(M_BH_draw_wandering/M_SC_br) - alpha_SC[j])/beta_SC[j] + np.random.normal(0.0, 0.5, size=ndraw_wandering))*M_star_norm_SC
+            # Get stellar mass of wandering BHs from NSC-BH mass relation
+            M_star_draw_wandering = 10**((np.log10(M_BH_draw_wandering/M_star_norm_SC) - alpha_SC[j])/beta_SC[j] +
+                                         np.random.normal(0.0, 0.5, size=ndraw_wandering))*M_SC_br
             # Red + blue + wandering population
             M_star_draw = np.concatenate([M_star_draw_wandering, M_star_draw_blue, M_star_draw_red])
             
             print('log N galaxies: ', np.around(np.log10(ndraw), 2))
-            print(np.around(np.log10(ndraw_wandering), 2), np.around(np.log10(len(M_star_draw_blue)), 2), np.around(np.log10(len(M_star_draw_red)), 2))
+            print(np.around(np.log10(ndraw_wandering), 2),
+                  np.around(np.log10(len(M_star_draw_blue)), 2),
+                  np.around(np.log10(len(M_star_draw_red)), 2))
             
             mask_wandering = np.concatenate([np.full(ndraw_wandering, True),
                                            np.full(len(M_star_draw_blue), False),
@@ -1199,12 +1244,13 @@ class DemographicModel:
         L_band_AGN = np.load(os.path.join(self.workdir, f'samples_L_{band}_{seed}_{j}.npy'))*u.erg/u.s
         L_bol_AGN = np.load(os.path.join(self.workdir, f'samples_L_draw_{seed}_{j}.npy'))*u.erg/u.s
         M_i_AGN = np.load(os.path.join(self.workdir, f'samples_M_i_{seed}_{j}.npy'))
+        pop = self.load_sample(f'pop', j=j)
 
         # Initialize arrays
         samples = {}
-        samples[f'm_{band}_{seed}'] = np.full(ndraw, np.nan)
-        samples[f'SFinf_{band}_{seed}'] = np.full(ndraw, np.nan)
-        samples[f'tau_RF_{band}_{seed}'] = np.full(ndraw, np.nan)
+        #samples[f'm_{band}_{seed}'] = np.full(ndraw, np.nan)
+        #samples[f'SFinf_{band}_{seed}'] = np.full(ndraw, np.nan)
+        #samples[f'tau_RF_{band}_{seed}'] = np.full(ndraw, np.nan)
 
         lambda_RF = lib[band].lpivot/(1 + z)
 
@@ -1220,10 +1266,13 @@ class DemographicModel:
 
         # Distributions of colors, and aperture flux ratios
         np.random.seed(j)
-        color_var = np.random.normal(0.0, 0.3, size=ndraw)
-        f_host = f_host_model(z, M_star.value, seed=j)
+        
+        mask_pop = pop < 2
+        f_host = np.ones(ndraw) # Assume star cluster mass hosting wanderers are unresolved
+        f_host[mask_pop] = f_host_model(z[mask_pop], M_star.value[mask_pop], seed=j)
 
         # This is r or g-band luminosity from the M/L ratio
+        color_var = np.random.normal(0.0, 0.3, size=ndraw)
         L_band_host = f_host * (M_star/(1*u.Msun) / 10**(b*g_minus_r + a + color_var))*u.Lsun
         L_band_host = L_band_host.to(u.erg/u.s)
 
@@ -1337,8 +1386,8 @@ class DemographicModel:
         ndraw = int(ndraws[j])
         workdir = self.workdir
         
-        t_obs_dense = np.arange(np.min(t_obs), np.max(t_obs), dt_min)
-        t_rest_dense = np.arange(np.min(t_obs), np.max(t_obs), dt_min)
+        t_obs_dense = t_obs #np.arange(np.min(t_obs), np.max(t_obs), dt_min)
+        t_rest_dense = t_obs #np.arange(np.min(t_obs), np.max(t_obs), dt_min)
         
         shape = np.count_nonzero(~mask_small)
         #t_obs_dense_shaped = (np.array([t_obs_dense]*shape)).T
@@ -1348,12 +1397,9 @@ class DemographicModel:
         lcs = simulate_drw(t_rest_dense_shaped, np.clip(tau, 2*dt_min, None), z, m_band, SFinf).T
         f = interp1d(t_obs_dense, lcs, fill_value='extrapolate')
         mag = f(t_obs)
-        samples = {}
-        samples[f'std_{seed}'] = np.full(ndraw, np.nan)
-        samples[f'sigvar_{seed}'] = np.full(ndraw, np.nan)
-        samples[f'lc_{band}_{seed}_idx'] = np.full(ndraw, np.arange(ndraw), dtype=np.int)
         
-        #samples[f'lc_{band}_{seed}'] = mag
+        samples = {}
+        samples[f'lc_{band}_{seed}_idx'] = np.full(ndraw, np.arange(ndraw), dtype=np.int)
         samples[f'lc_{band}_{seed}_idx'][mask_small] = -1
 
         # Calculate variability significance
@@ -1364,6 +1410,9 @@ class DemographicModel:
         magerr = pm_prec(mag)
         mag_obs = np.clip(np.random.normal(mag, magerr), 0, 30)
         
+        # Calculate variability significance
+        samples[f'std_{seed}'] = np.full(ndraw, np.nan)
+        samples[f'sigvar_{seed}'] = np.full(ndraw, np.nan)
         samples[f'std_{seed}'][indx] = np.std(mag_obs, axis=1)
         samples[f'sigvar_{seed}'][indx] = calcsigvar(mag_obs, magerr)
 
@@ -1403,11 +1452,61 @@ class DemographicModel:
                 
                 SFinf, tau, z, m_band, mask = self.sample_SF_tau(j, seed, t_obs, pm_prec=pm_prec, band=band,
                                                                  SFinf_small=SFinf_small, m_5=m_5)
-                
+                                
                 self.sample_light_curve(j, seed, SFinf, tau, z, m_band, mask, t_obs, pm_prec=pm_prec, dt_min=dt_min,
                                         band=band, SFinf_small=SFinf_small, m_5=m_5)
                                 
         return
+    
+    
+    def model_abc(self, parameters):
+        """
+        Wrapper function for likelihood free inference with pyabc
+        """
+        logmass_sys_err = 0.3
+        
+        # Need parameterized functional form for occupation fraction
+        def _sigmoid(x, x0=0.5, k=0.2, b=0):
+            """S-curve sigmoid function"""
+            A = 1 - b # force upper-limit to be 1
+            return A / (1 + np.exp(-k*(x - x0))) + b
+        
+        f_occ = lambda x: _sigmoid(x, x0=parameters["M_star_br"], k=parameters["scale"], b=parameters["b"])
+        
+        # Sample population
+        self.sample(nbootstrap=1, eta=100, zmax=0.1, ndraw_dim=1e9, omega=4*np.pi, seed_dict={'a':f_occ})
+        
+        # SED
+        self.sample_sed_grid(band=bands[key], save_fits=False, load_fits=True)
+        
+        # Light curves
+        pm_prec_model = lambda x: pm_prec(x, gamma=gamma[key], m_5=m_5[key])
+        self.sample_light_curves(t_obs[key], band=bands[key], m_5=m_5[key], SFinf_small=1e-8, pm_prec=pm_prec_model)
+        
+        # 
+        M_BH = self.load_sample(f'M_BH_draw', seed, j=0)
+        M_star_all = self.load_sample(f'M_star_draw', j=0)
+        mag = self.load_sample(f'm_{band}', seed, j=0)
+        sigvar = self.load_sample(f'sigvar', seed, j=0)
+        
+        mask_var = sigvar > 2
+        mask_mag = mag < m_5[key]
+        mask_sat = mag > m_sat[key]
+        mask_mass_all = M_BH_all > 1e2
+        
+        # Compute variable fraction
+        bins = np.arange(2.0, 8.0, 0.5)
+        log_M_star_all = np.log10(M_star_all[M_star_all > 0])
+        log_M_star_all += np.random.normal(0, logmass_sys_err, size=np.shape(M_star_all))
+        bin_count, _ = hist1d(log_M_star_all[mask_mass_all & mask_mag & mask_sat], statistic='count', bins=bins)
+        bin_count_var, _ = hist1d(log_M_star_all[mask_mass_all & mask_mag & mask_sat & mask_var], statistic='count', bins=bins)
+        f_var = bin_count_var/bin_count
+        
+        # Compute luminosity function (depends on ERDF)
+        n_L, _ = hist1d(L_draw_seed.value, bins=L_.value)
+        phi_L = n_L/dlogL/V
+        
+        return {"f_var": f_var, "phi_L": phi_L}
             
         
     def plot(self, seed_dict={'light':(lambda x: np.ones_like(x)), 'heavy':f_occ_heavyMS, 'light_stellar':(lambda x: np.ones_like(x))}, seed_colors=None, seed_markers=None, figsize=(3*6, 2*5), moct=np.nanmean, n_bin_min=10):
