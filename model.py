@@ -593,24 +593,24 @@ def drw(t_obs, x, tau, SFinf, E, N):
     """
     Generate damped random walk on grid t_obs
     """
-    #dt = np.diff(t_obs)
+    dt = np.diff(t_obs)
     for i in range(1, N):
-        dt = t_obs[i,:] - t_obs[i - 1,:]
+        #dt = t_obs[i,:] - t_obs[i - 1,:]
         #x[i,:] = (x[i - 1,:] - dt * (x[i - 1,:] - xmean) + np.sqrt(2) * SFinf * E[i,:] * np.sqrt(dt))
-        x[i] = (x[i - 1] * np.exp(-dt / tau) + SFinf * np.sqrt(1 - np.exp(-2 * dt / tau)) * E[i])
+        x[i] = (x[i - 1] * np.exp(-dt[i - 1] / tau) + SFinf * np.sqrt(1 - np.exp(-2 * dt[i - 1] / tau)) * E[i])
     return x
 
 
-def simulate_drw(t_rest, tau=300., z=2.0, xmean=0, SFinf=0.3):
+def simulate_drw(t_obs, tau=300, xmean=0, SFinf=0.3):
     """
     Simulate damped random walk on grid given tau, SF
     """
-    N = np.shape(t_rest)[0]
+    N = len(t_obs)
     ndraw = len(tau)
     
     # t_rest shape is [N, ndraw]
 
-    t_obs = t_rest * (1. + z) / tau
+    #t_obs = t_rest * (1. + z) / tau
     
     x = np.zeros((N, ndraw))
     #x[0,:] = np.random.normal(xmean, SFinf)
@@ -618,15 +618,17 @@ def simulate_drw(t_rest, tau=300., z=2.0, xmean=0, SFinf=0.3):
     x[0,:] = E[0,:] * SFinf
     
     #drw_jit = jax.jit(drw)
+    print(np.shape(xmean))
     lc = drw(t_obs, x, tau, SFinf, E, N) + xmean
     return lc
 
 
-def draw_SFinf(lambda_RF, M_i, M_BH, size=1, randomize=True):
+def draw_SFinf(lambda_RF, M_i, M_BH, randomize=True):
     """
     Get SF_\infty given AGN parameters
     """
     if randomize:
+        size = len(M_BH)
         A = np.random.normal(-0.479, 0.008, size=size)
         B = np.random.normal(-0.479, 0.005, size=size)
         C = np.random.normal(0.118, 0.003, size=size)
@@ -644,11 +646,12 @@ def draw_SFinf(lambda_RF, M_i, M_BH, size=1, randomize=True):
     return SFinf
 
 
-def draw_tau(lambda_RF, M_i, M_BH, size=1, randomize=True):
+def draw_tau(lambda_RF, M_i, M_BH, randomize=True):
     """
     Get tau given AGN parameters
     """
     if randomize:
+        size = len(M_BH)
         A = np.random.normal(2.0, 0.01, size=size)
         B = np.random.normal(0.17, 0.02, size=size)
         C = np.random.normal(0.03, 0.04, size=size)
@@ -823,9 +826,9 @@ class DemographicModel:
             M_BH_norm = 1*u.Msun
         
         # M_BH - M_NSC relation from Graham 2020
-        alpha_SC = np.random.normal(loc=8.22, scale=0.20, size=nbootstrap)
-        beta_SC = np.random.normal(loc=2.62, scale=0.42, size=nbootstrap)
-        M_SC_br = 10**7.83*u.Msun
+        alpha_SC = np.random.normal(loc=7.70, scale=0.20, size=nbootstrap)
+        beta_SC = np.random.normal(loc=0.38, scale=0.06, size=nbootstrap)
+        M_BH_SC_br = 10**7.89*u.Msun
         M_star_norm_SC = 1*u.Msun
         
         # Stellar Mass Function
@@ -928,8 +931,10 @@ class DemographicModel:
             ndraw = ndraw_gal + ndraw_wandering
             
             # Get stellar mass of wandering BHs from NSC-BH mass relation
-            M_star_draw_wandering = 10**((np.log10(M_BH_draw_wandering/M_star_norm_SC) - alpha_SC[j])/beta_SC[j] +
-                                         np.random.normal(0.0, 0.5, size=ndraw_wandering))*M_SC_br
+            #M_star_draw_wandering = 10**((np.log10(M_BH_draw_wandering/M_star_norm_SC) - alpha_SC[j])/beta_SC[j] +
+            #                             np.random.normal(0.0, 0.5, size=ndraw_wandering))*M_SC_br
+            M_star_draw_wandering = 10**(alpha_SC[j] + beta_SC[j]*np.log10(M_BH_draw_wandering/M_BH_SC_br) +
+                                         np.random.normal(0.0, 0.5, size=ndraw_wandering))*M_star_norm_SC
             # Red + blue + wandering population
             M_star_draw = np.concatenate([M_star_draw_wandering, M_star_draw_blue, M_star_draw_red])
             
@@ -988,7 +993,7 @@ class DemographicModel:
             # Host galaxy stellar mass
             M_BH_draw = np.full(ndraw, np.nan, dtype=dtype)*u.Msun
             M_BH_draw[~mask_wandering] = 10**(alpha[j] + beta[j]*np.log10(M_star_draw[~mask_wandering]/M_star_br) +
-                                            np.random.normal(0.0, 0.55, size=ndraw_gal))*M_BH_norm
+                                            np.random.normal(0.0, 0.6, size=ndraw_gal))*M_BH_norm
             M_BH_draw[mask_wandering] = M_BH_draw_wandering
             samples['M_BH_draw'] = M_BH_draw
             
@@ -1177,13 +1182,6 @@ class DemographicModel:
                 samples[f'L_{band}_{seed}'] = np.full(ndraw, 0.0)*u.erg/u.s
                 samples[f'M_i_{seed}'] = np.full(ndraw, np.nan)
                 
-                """
-                L_draw_seed = np.load(os.path.join(self.workdir, f'samples_L_draw_{seed}_{j}.npy'))*u.erg/u.s
-                M_BH_draw_seed = np.load(os.path.join(self.workdir, f'samples_M_BH_draw_{seed}_{j}.npy'))*u.Msun
-                lambda_draw = np.load(os.path.join(self.workdir, f'samples_lambda_draw_{j}.npy'))
-                z_draw = np.load(os.path.join(self.workdir, f'samples_z_draw_{j}.npy'))
-                """
-                
                 L_draw_seed = self.load_sample(f'L_draw', seed, j=j)*u.erg/u.s
                 M_BH_draw_seed = self.load_sample(f'M_BH_draw', seed, j=j)*u.Msun
                 lambda_draw = self.load_sample(f'lambda_draw', j=j)
@@ -1242,78 +1240,43 @@ class DemographicModel:
         ndraws = self.pars['ndraws']
         ndraw = int(ndraws[j])
         workdir = self.workdir
-
+        
         # Load samples
-        """
-        z = np.load(os.path.join(self.workdir, f'samples_z_draw_{j}.npy'))
-        M_BH = np.load(os.path.join(self.workdir, f'samples_M_BH_draw_{seed}_{j}.npy'))*u.Msun
-        M_star = np.load(os.path.join(self.workdir, f'samples_M_star_draw_{j}.npy'))*u.Msun
-        g_minus_r = np.load(os.path.join(self.workdir, f'samples_g-r_{j}.npy'))
-        L_band_AGN = np.load(os.path.join(self.workdir, f'samples_L_{band}_{seed}_{j}.npy'))*u.erg/u.s
-        L_bol_AGN = np.load(os.path.join(self.workdir, f'samples_L_draw_{seed}_{j}.npy'))*u.erg/u.s
-        M_i_AGN = np.load(os.path.join(self.workdir, f'samples_M_i_{seed}_{j}.npy'))
-        """
         z = self.load_sample(f'z_draw', j=j)
         M_BH = self.load_sample(f'M_BH_draw', seed, j=j)*u.Msun
         M_star = self.load_sample(f'M_star_draw', j=j)*u.Msun
         g_minus_r = self.load_sample(f'g-r', j=j)
         L_band_AGN = self.load_sample(f'L_{band}', seed, j=j)*u.erg/u.s
         L_bol_AGN = self.load_sample(f'L_draw', seed, j=j)*u.erg/u.s
-        M_i_AGN = self.load_sample(f'M_i', seed, j=j)
+        #M_i_AGN = self.load_sample(f'M_i', seed, j=j)
         pop = self.load_sample(f'pop', j=j)
-
+        
+        mask_na = L_band_AGN.value > 0
+        
         # Initialize arrays
         samples = {}
 
-        lambda_RF = lib[band].lpivot/(1 + z)
-
         # Use the host M/L ratio to get host galaxy luminosity
-        if band == 'SDSS_g':
-            a = -1.030 # g
-            b = 2.053
-        elif band == 'GROUND_COUSINS_R':
-            a = -0.840 # r
-            b = 1.654
-        else:
-            print("Not supported")
+        # https://ui.adsabs.harvard.edu/abs/2009MNRAS.400.1181Z/abstract
+        a = {'g': -1.030, 'r': -0.840, 'i': -0.845, 'z': -0.914}
+        b = {'g': 2.053, 'r': 1.654, 'i': 1.481, 'z': 1.382}
+        
+        # Convert e.g., "*_g"->"g" and "*_R"->"r"
+        band_key = band.split('_')[-1].lower()
 
         # Distributions of colors, and aperture flux ratios
         np.random.seed(j)
         
         mask_pop = pop < 2
         f_host = np.ones(ndraw) # Assume star cluster mass hosting wanderers are unresolved
-        f_host[mask_pop] = f_host_model(z[mask_pop], M_star.value[mask_pop], seed=j)
-
-        # This is r or g-band luminosity from the M/L ratio
-        color_var = np.random.normal(0.0, 0.3, size=ndraw)
-        L_band_host = f_host * (M_star/(1*u.Msun) / 10**(b*g_minus_r + a + color_var))*u.Lsun
-        L_band_host = L_band_host.to(u.erg/u.s)
-
-        """
-        fig = plt.figure()
-        ax = plt.gca()
-        ax.scatter(M_star.value, (M_star/(1*u.Msun) / 10**(b*g_minus_r + a + color_var)), s=.1)
-        ax.set_yscale('log')
-        ax.set_xscale('log')
-        plt.show()
-
-        fig = plt.figure()
-        ax = plt.gca()
-        ax.scatter(M_star.value, g_minus_r, s=1)
-        ax.set_xscale('log')
-        plt.show()
-
-        fig = plt.figure()
-        ax = plt.gca()
-        ax.scatter(M_star.value, 10**(b*g_minus_r + a + color_var), s=1)
-        ax.scatter(M_star.value, 10**(b*g_minus_r + a), s=1)
-        ax.set_yscale('log')
-        ax.set_xscale('log')
-        plt.show()
-        """
+        f_host[mask_pop & mask_na] = f_host_model(z[mask_pop & mask_na], M_star.value[mask_pop & mask_na], seed=j)
         
+        # Compute host galaxy band luminosity from the M/L ratio
+        color_var = np.random.normal(0.0, 0.3, size=ndraw)
+        L_band_host = (f_host * (M_star/(1*u.Msun) /10**(b[band_key]*g_minus_r + a[band_key] + color_var))*u.Lsun).to(u.erg/u.s)
+                
         d_L = cosmo.comoving_distance(z).to(u.cm)
-
+        
         # Get apparent magnitude of AGN + host galaxy
         if band == 'GROUND_COUSINS_R':
             # r -> R color correction
@@ -1343,6 +1306,7 @@ class DemographicModel:
             L_band_host = L_band_host.to(u.erg/u.s)
 
         # Host-galaxy K-correction
+        """
         elif band == 'SDSS_g':
             f_band_host = L_band_host / (4*np.pi*d_L**2)
             f_lambda_band_host = (f_band_host / lib[band].lpivot).to(u.erg/u.s/u.cm**2/u.AA)
@@ -1354,37 +1318,36 @@ class DemographicModel:
             f_band_host = (f_lambda_band_host * lib[band].lpivot).to(u.erg/u.s/u.cm**2)
             #L_band_host = f_band_host * (4*np.pi*d_L**2)
             #L_band_host = L_band_host.to(u.erg/u.s) # (g)
+        """    
 
         # No color correction
         f_band = (L_band_host + L_band_AGN) / (4*np.pi*d_L**2)
-        #f_band_host = L_band_host / (4*np.pi*d_L**2)
-
         f_lambda_band = (f_band / lib[band].lpivot).to(u.erg/u.s/u.cm**2/u.AA)
-        #f_lambda_band_host = (f_band_host / lib[band].lpivot).to(u.erg/u.s/u.cm**2/u.AA)
-
         m_band = -2.5*np.log10(f_lambda_band.value) - lib[band].AB_zero_mag
-        #m_band_host = -2.5*np.log10(f_lambda_band_host.value) - lib[band].AB_zero_mag
-
-        # Fluxes
+        
         samples[f'm_{band}_{seed}'] = m_band
-
+        
+        mask_mag = m_band < (m_5 + 1)
+        
         # Draw SF_\infty and tau (rest-frame)
         # In M10, M_i is basically a proxy for L_bol, so we need to use the Shen relation
         # even for IMBHs, to preserve the linearity in the extrapolation of this relation
-        M_i_AGN = 90 - 2.5*np.log10(L_bol_AGN.to(u.erg/u.s).value)
-
-        SFinf = draw_SFinf(lambda_RF.to(u.AA).value, M_i_AGN, M_BH.value, size=ndraw)
-        tau = draw_tau(lambda_RF.to(u.AA).value, M_i_AGN, M_BH.value, size=ndraw)
-
-        # Host-galaxy dilution
-        dL = L_band_AGN*np.log(10)/2.5*SFinf #* 1.3 # The 1.3 is a fudge factor to normalize with the qsos
-        SFinf = 2.5/np.log(10)*dL/(L_band_AGN + L_band_host)
+        M_i_AGN = 90 - 2.5*np.log10(L_bol_AGN[mask_mag & mask_na].to(u.erg/u.s).value)
         
+        lambda_RF = lib[band].lpivot/(1 + z[mask_mag & mask_na])
+        
+        # Host-galaxy dilution
+        SFinf = np.zeros(ndraw)
+        SFinf_AGN = draw_SFinf(lambda_RF.to(u.AA).value, M_i_AGN, M_BH[mask_mag & mask_na].value)
+        SFinf[mask_mag & mask_na] = SFinf_AGN * L_band_AGN[mask_mag & mask_na] / (L_band_AGN[mask_mag & mask_na] + L_band_host[mask_mag & mask_na])
+        
+        tau = np.zeros(ndraw)
+        tau[mask_mag & mask_na] = draw_tau(lambda_RF.to(u.AA).value, M_i_AGN, M_BH[mask_mag & mask_na].value)
         samples[f'SFinf_{band}_{seed}'] = SFinf
         samples[f'tau_RF_{band}_{seed}'] = tau
 
         # Light curves
-        mask_small = (SFinf < SFinf_small) | (M_BH < 1e2*u.Msun) | (m_band > m_5+1)
+        mask_small = (SFinf < SFinf_small) | (M_BH < 1e2*u.Msun) | (m_band > (m_5 + 1))
         
         # Save the results to free up memory
         self.save_samples(samples, j)
@@ -1399,23 +1362,25 @@ class DemographicModel:
         ndraw = int(ndraws[j])
         workdir = self.workdir
         
-        t_obs_dense = t_obs #np.arange(np.min(t_obs), np.max(t_obs), dt_min)
-        t_rest_dense = t_obs #np.arange(np.min(t_obs), np.max(t_obs), dt_min)
+        #t_obs_dense = t_obs #np.arange(np.min(t_obs), np.max(t_obs), dt_min)
+        #t_rest_dense = t_obs #np.arange(np.min(t_obs), np.max(t_obs), dt_min)
         
-        shape = np.count_nonzero(~mask_small)
+        #shape = np.count_nonzero(~mask_small)
         #t_obs_dense_shaped = (np.array([t_obs_dense]*shape)).T
-        t_rest_dense_shaped = (np.array([t_rest_dense]*shape)).T / (1 + z)
+        #t_rest_dense_shaped = (np.array([t_rest_dense]*shape)).T / (1 + z)
+        print('simulate')
 
         # Simulate light curves (clip tau to avoid numerical issues if tau << dt_min)
-        lcs = simulate_drw(t_rest_dense_shaped, np.clip(tau, 2*dt_min, None), z, m_band, SFinf).T
-        f = interp1d(t_obs_dense, lcs, fill_value='extrapolate')
-        mag = f(t_obs)
+        #lcs = simulate_drw(t_rest_dense_shaped, np.clip(tau, 2*dt_min, None), z, m_band, SFinf).T
+        tau_obs = tau * (1 + z)
+        mag = simulate_drw(t_obs, tau_obs, m_band, SFinf).T
+        #f = interp1d(t_obs_dense, lcs, fill_value='extrapolate')
+        #mag = f(t_obs)
         
         samples = {}
         samples[f'lc_{band}_{seed}_idx'] = np.full(ndraw, np.arange(ndraw), dtype=np.int)
         samples[f'lc_{band}_{seed}_idx'][mask_small] = -1
 
-        # Calculate variability significance
         indx = samples[f'lc_{band}_{seed}_idx'][~mask_small]
         indx = indx[np.isfinite(indx)].astype(np.int)
 
@@ -1461,7 +1426,7 @@ class DemographicModel:
                 
                 SFinf, tau, z, m_band, mask = self.sample_SF_tau(j, seed, t_obs, pm_prec=pm_prec, band=band,
                                                                  SFinf_small=SFinf_small, m_5=m_5)
-                                
+                                                
                 self.sample_light_curve(j, seed, SFinf, tau, z, m_band, mask, t_obs, pm_prec=pm_prec, dt_min=dt_min,
                                         band=band, SFinf_small=SFinf_small, m_5=m_5)
                                 
