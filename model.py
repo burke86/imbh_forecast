@@ -1362,38 +1362,31 @@ class DemographicModel:
         ndraw = int(ndraws[j])
         workdir = self.workdir
         
-        #t_obs_dense = t_obs #np.arange(np.min(t_obs), np.max(t_obs), dt_min)
-        #t_rest_dense = t_obs #np.arange(np.min(t_obs), np.max(t_obs), dt_min)
-        
-        #shape = np.count_nonzero(~mask_small)
-        #t_obs_dense_shaped = (np.array([t_obs_dense]*shape)).T
-        #t_rest_dense_shaped = (np.array([t_rest_dense]*shape)).T / (1 + z)
-        print('simulate')
-
-        # Simulate light curves (clip tau to avoid numerical issues if tau << dt_min)
-        #lcs = simulate_drw(t_rest_dense_shaped, np.clip(tau, 2*dt_min, None), z, m_band, SFinf).T
+        # Simulate light curves
         tau_obs = tau * (1 + z)
         mag = simulate_drw(t_obs, tau_obs, m_band, SFinf).T
-        #f = interp1d(t_obs_dense, lcs, fill_value='extrapolate')
-        #mag = f(t_obs)
         
-        samples = {}
-        samples[f'lc_{band}_{seed}_idx'] = np.full(ndraw, np.arange(ndraw), dtype=np.int)
-        samples[f'lc_{band}_{seed}_idx'][mask_small] = -1
-
-        indx = samples[f'lc_{band}_{seed}_idx'][~mask_small]
-        indx = indx[np.isfinite(indx)].astype(np.int)
-
         # Add uncertainty
         magerr = pm_prec(mag)
         mag_obs = np.clip(np.random.normal(mag, magerr), 0, 30)
         
-        # Calculate variability significance
-        samples[f'std_{seed}'] = np.full(ndraw, np.nan)
-        samples[f'sigvar_{seed}'] = np.full(ndraw, np.nan)
-        samples[f'std_{seed}'][indx] = np.std(mag_obs, axis=1)
-        samples[f'sigvar_{seed}'][indx] = calcsigvar(mag_obs, magerr)
+        # Save light curve data
+        samples = {}
+        #samples[f'lc_{band}_{seed}_idx'] = np.full(ndraw, np.arange(ndraw), dtype=np.int)
+        #samples[f'lc_{band}_{seed}_idx'][mask_small] = -1
+        
+        samples[f'lc_{band}_{seed}'] = np.full((ndraw, len(t_obs)), np.nan)
+        samples[f'lc_{band}_{seed}'][~mask_small] = mag_obs
 
+        #indx = samples[f'lc_{band}_{seed}_idx'][~mask_small]
+        #indx = indx[np.isfinite(indx)].astype(np.int)
+        
+        # Calculate variability significance
+        samples[f'std_{seed}'] = np.zeros(ndraw)
+        samples[f'sigvar_{seed}'] = np.zeros(ndraw)
+        samples[f'std_{seed}'][~mask_small] = np.std(mag_obs, axis=1)
+        samples[f'sigvar_{seed}'][~mask_small] = calcsigvar(mag_obs, magerr)
+        
         """
         for l, v in enumerate(indx):
             try:
