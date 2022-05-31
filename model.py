@@ -5,6 +5,7 @@ from pathlib import Path
 import re
 import subprocess
 import pickle
+import h5py
 
 import numpy as np
 from astropy import units as u
@@ -595,8 +596,6 @@ def drw(t_obs, x, tau, SFinf, E, N):
     """
     dt = np.diff(t_obs)
     for i in range(1, N):
-        #dt = t_obs[i,:] - t_obs[i - 1,:]
-        #x[i,:] = (x[i - 1,:] - dt * (x[i - 1,:] - xmean) + np.sqrt(2) * SFinf * E[i,:] * np.sqrt(dt))
         x[i] = (x[i - 1] * np.exp(-dt[i - 1] / tau) + SFinf * np.sqrt(1 - np.exp(-2 * dt[i - 1] / tau)) * E[i])
     return x
 
@@ -609,16 +608,11 @@ def simulate_drw(t_obs, tau=300, xmean=0, SFinf=0.3):
     ndraw = len(tau)
     
     # t_rest shape is [N, ndraw]
-
-    #t_obs = t_rest * (1. + z) / tau
     
     x = np.zeros((N, ndraw))
-    #x[0,:] = np.random.normal(xmean, SFinf)
     E = np.random.normal(0, 1, (N, ndraw))
     x[0,:] = E[0,:] * SFinf
     
-    #drw_jit = jax.jit(drw)
-    print(np.shape(xmean))
     lc = drw(t_obs, x, tau, SFinf, E, N) + xmean
     return lc
 
@@ -755,7 +749,12 @@ class DemographicModel:
             s = samples[key]
             if isinstance(s, u.quantity.Quantity):
                 s = s.value
-            np.save(os.path.join(self.workdir, f'samples_{key}_{j}'), s)
+            #np.save(os.path.join(self.workdir, f'samples_{key}_{j}'), s)
+            datasetname = f'samples_{key}_{j}.h5'
+            filename = os.path.join(self.workdir, datasetname)
+            with h5py.File(filename, 'w') as hf:
+                hf.create_dataset(datasetname,  data=s)
+        return
     
     
     def load_sample(self, name='z_draw', seed=None, j=0):
@@ -763,9 +762,15 @@ class DemographicModel:
         Load array of samples into memory
         """
         if seed is None:
-            data = np.load(os.path.join(self.workdir, f'samples_{name}_{j}.npy'))
+            datasetname = f'samples_{name}_{j}.h5'
+            #data = np.load(os.path.join(self.workdir, f'samples_{name}_{j}.npy'))
         else:
-            data = np.load(os.path.join(self.workdir, f'samples_{name}_{seed}_{j}.npy'))
+            datasetname = f'samples_{name}_{seed}_{j}.h5'
+            #data = np.load(os.path.join(self.workdir, f'samples_{name}_{seed}_{j}.npy'))
+        # Load data
+        filename = os.path.join(self.workdir, datasetname)
+        with h5py.File(filename, 'r') as hf:
+            data = hf[datasetname][:]
         return data
     
 
@@ -931,8 +936,6 @@ class DemographicModel:
             ndraw = ndraw_gal + ndraw_wandering
             
             # Get stellar mass of wandering BHs from NSC-BH mass relation
-            #M_star_draw_wandering = 10**((np.log10(M_BH_draw_wandering/M_star_norm_SC) - alpha_SC[j])/beta_SC[j] +
-            #                             np.random.normal(0.0, 0.5, size=ndraw_wandering))*M_SC_br
             M_star_draw_wandering = 10**(alpha_SC[j] + beta_SC[j]*np.log10(M_BH_draw_wandering/M_BH_SC_br) +
                                          np.random.normal(0.0, 0.5, size=ndraw_wandering))*M_star_norm_SC
             # Red + blue + wandering population
@@ -1248,7 +1251,6 @@ class DemographicModel:
         g_minus_r = self.load_sample(f'g-r', j=j)
         L_band_AGN = self.load_sample(f'L_{band}', seed, j=j)*u.erg/u.s
         L_bol_AGN = self.load_sample(f'L_draw', seed, j=j)*u.erg/u.s
-        #M_i_AGN = self.load_sample(f'M_i', seed, j=j)
         pop = self.load_sample(f'pop', j=j)
         
         mask_na = L_band_AGN.value > 0
@@ -1355,8 +1357,8 @@ class DemographicModel:
         return SFinf[~mask_small], tau[~mask_small], z[~mask_small], m_band[~mask_small], mask_small
     
     
-    def sample_light_curve(self, j, seed, SFinf, tau, z, m_band, mask_small, t_obs,
-                           pm_prec=pm_prec, dt_min=10, band='SDSS_g', SFinf_small=1e-8, m_5=25.0):
+    def sample_light_curve(self, j, seed, SFinf, tau, z, m_band, mask_small, t_obs, save_lc=True,
+                           pm_prec=pm_prec, band='SDSS_g', SFinf_small=1e-8, m_5=25.0):
         
         ndraws = self.pars['ndraws']
         ndraw = int(ndraws[j])
@@ -1372,14 +1374,10 @@ class DemographicModel:
         
         # Save light curve data
         samples = {}
-        #samples[f'lc_{band}_{seed}_idx'] = np.full(ndraw, np.arange(ndraw), dtype=np.int)
-        #samples[f'lc_{band}_{seed}_idx'][mask_small] = -1
         
-        samples[f'lc_{band}_{seed}'] = np.full((ndraw, len(t_obs)), np.nan)
-        samples[f'lc_{band}_{seed}'][~mask_small] = mag_obs
-
-        #indx = samples[f'lc_{band}_{seed}_idx'][~mask_small]
-        #indx = indx[np.isfinite(indx)].astype(np.int)
+        if save_lc:
+            samples[f'lc_{band}_{seed}'] = np.full((ndraw, len(t_obs)), np.nan)
+            samples[f'lc_{band}_{seed}'][~mask_small] = mag_obs
         
         # Calculate variability significance
         samples[f'std_{seed}'] = np.zeros(ndraw)
@@ -1404,7 +1402,7 @@ class DemographicModel:
         return
     
     
-    def sample_light_curves(self, t_obs, pm_prec=pm_prec, dt_min=10, band='SDSS_g', SFinf_small=1e-8, m_5=25.0):
+    def sample_light_curves(self, t_obs, pm_prec=pm_prec, save_lc=True, band='SDSS_g', SFinf_small=1e-8, m_5=25.0):
         
         pars = self.pars
         nbootstrap = pars['nbootstrap']
@@ -1420,7 +1418,7 @@ class DemographicModel:
                 SFinf, tau, z, m_band, mask = self.sample_SF_tau(j, seed, t_obs, pm_prec=pm_prec, band=band,
                                                                  SFinf_small=SFinf_small, m_5=m_5)
                                                 
-                self.sample_light_curve(j, seed, SFinf, tau, z, m_band, mask, t_obs, pm_prec=pm_prec, dt_min=dt_min,
+                self.sample_light_curve(j, seed, SFinf, tau, z, m_band, mask, t_obs, pm_prec=pm_prec, save_lc=save_lc,
                                         band=band, SFinf_small=SFinf_small, m_5=m_5)
                                 
         return
