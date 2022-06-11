@@ -7,6 +7,8 @@ import subprocess
 import pickle
 import h5py
 
+from mpire import WorkerPool
+
 import numpy as np
 from astropy import units as u
 import astropy.constants as const
@@ -212,7 +214,7 @@ def BHMF_wandering(M_BH):
     """
     Black hole mass function (BHMF) anchored to LIGO/VIRGO GW merger rates below 10^2 Msun
     Fig. 14 of https://ui.adsabs.harvard.edu/abs/2022ApJ...924...56S/abstract
-    Low-mass end of the Schechter function is anchored to 10^4 Msun
+    Low-mass end of the Schechter function is anchored to ~10^4 Msun
     """
     phi_ = 10**np.random.normal(-1, 0.3)
     M_BH_br = 1e4
@@ -323,7 +325,7 @@ def ERDF_blue(lambda_Edd, xi=10**-1.65, seed=None):
     # Lbr = 10**38.1 lambda_br M_BH_br
     # 10^41.67 = 10^38.1 * 10^x * 10^10.66
     lambda_br = 10**np.random.normal(-1.84, np.mean([0.30, 0.37]))
-    delta1 = np.random.normal(0.471-0.7, np.mean([0.02, 0.02])) # -0.7 #np.random.normal(0.471, np.mean([0.20, 0.42])) # -0.45
+    delta1 = np.random.normal(0.471-0.7, np.mean([0.02, 0.02])) # > -0.45 won't affect LF
     delta2 = np.random.normal(2.53, np.mean([0.68, 0.38]))
     # https://ui.adsabs.harvard.edu/abs/2019ApJ...883..139S/abstract
     # What sets the break? Transfer from radiatively efficient to inefficient accretion?
@@ -337,7 +339,7 @@ def ERDF_red(lambda_Edd, xi=10**-2.13, seed=None):
     # Lbr = 10**38.1 lambda_br M_BH_br
     # 10^41.67 = 10^38.1 * 10^x * 10^10.66
     lambda_br = 10**np.random.normal(-2.81, np.mean([0.22, 0.14]))
-    delta1 = np.random.normal(0.41-0.7, np.mean([0.02, 0.02])) # This is not sensitive
+    delta1 = np.random.normal(0.41-0.7, np.mean([0.02, 0.02])) # > -0.45 won't affect LF
     delta2 = np.random.normal(1.22, np.mean([0.19, 0.13]))
     # https://ui.adsabs.harvard.edu/abs/2019ApJ...883..139S/abstract
     # What sets the break? Transfer from radiatively efficient to inefficient accretion?
@@ -609,11 +611,11 @@ def simulate_drw(t_obs, tau=300, xmean=0, SFinf=0.3):
     
     # t_rest shape is [N, ndraw]
     
-    x = np.zeros((N, ndraw))
-    E = np.random.normal(0, 1, (N, ndraw))
+    x = np.zeros((N, ndraw), dtype=np.float16)
+    E = np.random.normal(0, 1, (N, ndraw)).astype(np.float16)
     x[0,:] = E[0,:] * SFinf
     
-    lc = drw(t_obs, x, tau, SFinf, E, N) + xmean
+    lc = drw(t_obs, x, tau, SFinf, E, N) + xmean.astype(np.float16)
     return lc
 
 
@@ -673,6 +675,8 @@ def inv_transform_sampling(y, x, n_samples=1000, survival=False):
     dx = np.diff(x)
     cum_values = np.zeros(x.shape)
     cum_values[1:] = np.cumsum(y*dx)/np.sum(y*dx)
+    #r = np.random.rand(n_samples)
+    #return np.interp(n_samples, x, cum_values)
     inv_cdf = interp1d(cum_values, x, fill_value='extrapolate')
     if survival:
         n_samples = int(survival)
@@ -738,6 +742,7 @@ class DemographicModel:
         """
         with open(os.path.join(self.workdir, f'pars_{survey}.pkl'), 'wb') as f:
             pickle.dump(self.pars, f)
+            print(os.path.join(self.workdir, f'pars_{survey}.pkl'))
         return
     
     
@@ -747,11 +752,13 @@ class DemographicModel:
         """
         for key in samples.keys():
             s = samples[key]
+            # Remove units
             if isinstance(s, u.quantity.Quantity):
                 s = s.value
-            #np.save(os.path.join(self.workdir, f'samples_{key}_{j}'), s)
+            # Construct filepath
             datasetname = f'samples_{key}_{j}.h5'
             filename = os.path.join(self.workdir, datasetname)
+            # Write file
             with h5py.File(filename, 'w') as hf:
                 hf.create_dataset(datasetname,  data=s)
         return
@@ -761,14 +768,13 @@ class DemographicModel:
         """
         Load array of samples into memory
         """
+        # Construct filepath
         if seed is None:
             datasetname = f'samples_{name}_{j}.h5'
-            #data = np.load(os.path.join(self.workdir, f'samples_{name}_{j}.npy'))
         else:
             datasetname = f'samples_{name}_{seed}_{j}.h5'
-            #data = np.load(os.path.join(self.workdir, f'samples_{name}_{seed}_{j}.npy'))
-        # Load data
         filename = os.path.join(self.workdir, datasetname)
+        # Load file
         with h5py.File(filename, 'r') as hf:
             data = hf[datasetname][:]
         return data
@@ -1073,7 +1079,6 @@ class DemographicModel:
         workdir = self.workdir
                 
         ndraws = pars['ndraws']
-        ndraw_dim = int(np.max(ndraws))
         
         self.model_sed_name = model_sed_name
         self.w0 = w0
@@ -1238,7 +1243,11 @@ class DemographicModel:
         return
     
     
-    def sample_SF_tau(self, j, seed, t_obs, pm_prec=pm_prec, band='SDSS_g', SFinf_small=1e-8, m_5=25.0):
+    def sample_SF_tau(self, j, seed, t_obs, pm_prec=pm_prec, band='SDSS_g', m_5=25.0):
+        """
+        Sampe SF and tau given host galaxy luminosity (from M/L ratios) and BH mass and Eddington ratio
+        
+        """
 
         ndraws = self.pars['ndraws']
         ndraw = int(ndraws[j])
@@ -1349,78 +1358,101 @@ class DemographicModel:
         samples[f'tau_RF_{band}_{seed}'] = tau
 
         # Light curves
-        mask_small = (SFinf < SFinf_small) | (M_BH < 1e2*u.Msun) | (m_band > (m_5 + 1))
+        #mask_small = (SFinf < SFinf_small) | (M_BH < 1e2*u.Msun) | (m_band > (m_5 + 1))
         
         # Save the results to free up memory
         self.save_samples(samples, j)
 
-        return SFinf[~mask_small], tau[~mask_small], z[~mask_small], m_band[~mask_small], mask_small
+        return
     
     
-    def sample_light_curve(self, j, seed, SFinf, tau, z, m_band, mask_small, t_obs, save_lc=True,
-                           pm_prec=pm_prec, band='SDSS_g', SFinf_small=1e-8, m_5=25.0):
+    def sample_light_curve(self, j, seed, t_obs, save_lc=True, pm_prec=pm_prec, band='SDSS_g', m_5=25.0):
+        """
+        Sampe light curves given DRW parameters
+        
+        Generates random noise for each light curve with mag < m_5
+        so we get a consistent number of galaxies in the parent sample
+        regardless of whether it has a BH (the input occupation fraction)
+        
+        """
         
         ndraws = self.pars['ndraws']
         ndraw = int(ndraws[j])
         workdir = self.workdir
         
-        # Simulate light curves
-        tau_obs = tau * (1 + z)
-        mag = simulate_drw(t_obs, tau_obs, m_band, SFinf).T
+        # Load samples
+        m_band = self.load_sample(f'm_{band}', seed, j=j)
         
-        # Add uncertainty
-        magerr = pm_prec(mag)
-        mag_obs = np.clip(np.random.normal(mag, magerr), 0, 30)
+        # Mask here to save memory
+        mask_mag = (m_band < (m_5 + 1))
+        
+        SFinf_mag = self.load_sample(f'SFinf_{band}', seed, j=j)[mask_mag]
+        tau_mag = self.load_sample(f'tau_RF_{band}', seed, j=j)[mask_mag]
+        z_mag = self.load_sample(f'z_draw', j=j)[mask_mag]
+                
+        print('sim lc')
+        
+        # Simulate light curves
+        tau_obs_mag = tau_mag * (1 + z_mag)
+        lc_mag = simulate_drw(t_obs, tau_obs_mag, m_band[mask_mag], SFinf_mag).T
+                
+        print('add noise')
+        
+        # Add noise to light curves
+        lc_mag_err = pm_prec(lc_mag)
+        lc_mag_obs = np.clip(np.random.normal(lc_mag, lc_mag_err), 0, 30)
+        
+        print('calc sig')
         
         # Save light curve data
         samples = {}
-        
         if save_lc:
-            samples[f'lc_{band}_{seed}'] = np.full((ndraw, len(t_obs)), np.nan)
-            samples[f'lc_{band}_{seed}'][~mask_small] = mag_obs
+            # Add to samples
+            samples[f'lc_mag_{band}_{seed}'] = mag_obs
+            samples[f'lc_magerr_{band}_{seed}'] = mag_err
         
         # Calculate variability significance
-        samples[f'std_{seed}'] = np.zeros(ndraw)
-        samples[f'sigvar_{seed}'] = np.zeros(ndraw)
-        samples[f'std_{seed}'][~mask_small] = np.std(mag_obs, axis=1)
-        samples[f'sigvar_{seed}'][~mask_small] = calcsigvar(mag_obs, magerr)
-        
-        """
-        for l, v in enumerate(indx):
-            try:
-                r = qso_fit(t_obs, mag_obs[l], magerr[l])
-                samples[f'sigvar_{seed}'][v] = r['signif_vary']
-                samples[f'sigqso_{seed}'][v] = r['signif_qso']
-            except:
-                # why the nans?
-                #print(mag_obs[l])
-                pass
-        """
+        samples[f'std_{seed}'] = np.zeros(nbootstrap)
+        samples[f'sigvar_{seed}'] = np.zeros(nbootstrap)
+        samples[f'std_{seed}'][mask_mag] = np.std(lc_mag_obs, axis=1)
+        samples[f'sigvar_{seed}'][mask_mag] = calcsigvar(lc_mag_obs, lc_mag_err)
 
         # Save the results to free up memory
         self.save_samples(samples, j)
         return
     
     
-    def sample_light_curves(self, t_obs, pm_prec=pm_prec, save_lc=True, band='SDSS_g', SFinf_small=1e-8, m_5=25.0):
+    def sample_light_curves(self, t_obs, pm_prec=pm_prec, save_lc=True, band='SDSS_g', m_5=25.0):
         
         pars = self.pars
         nbootstrap = pars['nbootstrap']
+        
+        n_jobs = 4
         
         pars['lc_t_obs'] = t_obs
                         
         for k, seed in enumerate(pars['seed_keys']):
             
             print(f'Sampling light curves with seeding mechanism {seed}')
+                        
+            """
+            with WorkerPool(n_jobs=n_jobs) as pool:
+                args = zip(j, seed, t_obs, pm_prec=pm_prec, band=band, SFinf_small=SFinf_small, m_5=m_5)
+                pool.imap(self.sample_SF_tau, args, progress_bar=True)
+                
+                args = zip(j, seed, SFinf, tau, z, m_band, mask, t_obs, pm_prec=pm_prec, save_lc=save_lc,
+                                        band=band, SFinf_small=SFinf_small, m_5=m_5)
+                pool.imap(self.sample_light_curve, args, progress_bar=True)
+            """
             
+            #"""
             for j in tqdm(range(nbootstrap)):
                 
-                SFinf, tau, z, m_band, mask = self.sample_SF_tau(j, seed, t_obs, pm_prec=pm_prec, band=band,
-                                                                 SFinf_small=SFinf_small, m_5=m_5)
+                self.sample_SF_tau(j, seed, t_obs, pm_prec=pm_prec, band=band, m_5=m_5)
                                                 
-                self.sample_light_curve(j, seed, SFinf, tau, z, m_band, mask, t_obs, pm_prec=pm_prec, save_lc=save_lc,
-                                        band=band, SFinf_small=SFinf_small, m_5=m_5)
-                                
+                self.sample_light_curve(j, seed, t_obs, pm_prec=pm_prec, save_lc=save_lc,
+                                        band=band, m_5=m_5)
+            #"""                     
         return
     
     
@@ -1484,19 +1516,11 @@ class DemographicModel:
         pars = self.pars
         ndraws = pars['ndraws']
         workdir = self.workdir
-        
-        ndraw_dim = int(np.max(ndraws))
-        
+                
         V = pars['V']
         
         n_i_M = np.load(os.path.join(workdir, f'hist_n_i_M.npy'))
         n_i_Edd = np.load(os.path.join(workdir, f'hist_n_i_Edd.npy'))
-        #n_i_M = hists['n_i_M'] #[:,:ndraw_dim]
-        #n_i_Edd = hists['n_i_Edd'] #[:,:ndraw_dim]
-        
-        # Clean
-        #n_i_M[:, n_i_M[0] < n_bin_min] = np.nan
-        #n_i_Edd[:, n_i_Edd[0] < n_bin_min] = np.nan
                         
         M_star_ = pars['M_star_']
         M_star = pars['M_star']
