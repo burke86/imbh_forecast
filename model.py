@@ -7,39 +7,30 @@ import subprocess
 import pickle
 import h5py
 
-from mpire import WorkerPool
-
 import numpy as np
 from astropy import units as u
 import astropy.constants as const
 import scipy.stats as st
-from scipy.interpolate import interp1d, RegularGridInterpolator, LinearNDInterpolator
+from scipy.interpolate import interp1d, RegularGridInterpolator
 from numpy.polynomial.polynomial import polyval2d
 from scipy.integrate import trapz, cumtrapz
 from astropy.io import fits
 from fast_histogram import histogram1d
-from qsofit import qso_fit
 
 import jax
 import jax.numpy as jnp
-from tinygp import kernels, GaussianProcess
 
 import matplotlib.pyplot as plt
-from labellines import labelLine, labelLines
 from tqdm.notebook import tqdm
 
 from astropy.cosmology import FlatLambdaCDM, z_at_value
 cosmo = FlatLambdaCDM(H0=70, Om0=0.3)
 
-import xspec
 from pyphot import astropy as pyphot
 
 from numba import njit
 
 lib = pyphot.get_library()
-
-# https://heasarc.gsfc.nasa.gov/xanadu/xspec/manual/node205.html#optxagnf
-xspec.Xset.allowPrompting = False
 
 def set_mpl_style(fsize=15, tsize=18, tdir='in', major=5.0, minor=3.0, lwidth=1.8, lhandle=2.0):
     
@@ -611,11 +602,11 @@ def simulate_drw(t_obs, tau=300, xmean=0, SFinf=0.3):
     
     # t_rest shape is [N, ndraw]
     
-    x = np.zeros((N, ndraw), dtype=np.float16)
-    E = np.random.normal(0, 1, (N, ndraw)).astype(np.float16)
+    x = np.zeros((N, ndraw))
+    E = np.random.normal(0, 1, (N, ndraw))
     x[0,:] = E[0,:] * SFinf
     
-    lc = drw(t_obs, x, tau, SFinf, E, N) + xmean.astype(np.float16)
+    lc = drw(t_obs, x, tau, SFinf, E, N) + xmean
     return lc
 
 
@@ -666,7 +657,7 @@ def draw_tau(lambda_RF, M_i, M_BH, randomize=True):
     return tau
 
 
-def inv_transform_sampling(y, x, n_samples=1000, survival=False):
+def inv_transform_sampling(y, x, n_samples=1000):
     """
     Perform inverse transform sampling on curve y(x)
     https://tmramalho.github.io/blog/2013/12/16/how-to-do-inverse-transformation-sampling-in-scipy-and-numpy/
@@ -675,14 +666,8 @@ def inv_transform_sampling(y, x, n_samples=1000, survival=False):
     dx = np.diff(x)
     cum_values = np.zeros(x.shape)
     cum_values[1:] = np.cumsum(y*dx)/np.sum(y*dx)
-    #r = np.random.rand(n_samples)
-    #return np.interp(n_samples, x, cum_values)
-    inv_cdf = interp1d(cum_values, x, fill_value='extrapolate')
-    if survival:
-        n_samples = int(survival)
-        #print(n_samples)
-    r = np.random.rand(n_samples)
-    return inv_cdf(r)
+    r = np.random.rand(int(n_samples))
+    return np.interp(r, cum_values, x)
 
 
 def survival_sampling(y, survival, fill_value=np.nan):
@@ -932,9 +917,9 @@ class DemographicModel:
             sf_red = Vred * trapz((phidM_red/dM_star).value, M_star.value)
             sf_wandering = Vred * trapz((phidM_wandering/dM_BH).value, M_BH.value)
             
-            M_star_draw_blue = inv_transform_sampling((phidM_blue/dM_star).value, M_star_.value, survival=sf_blue)*u.Msun
-            M_star_draw_red = inv_transform_sampling((phidM_red/dM_star).value, M_star_.value, survival=sf_red)*u.Msun
-            M_BH_draw_wandering = inv_transform_sampling((phidM_wandering/dM_BH).value, M_BH_.value, survival=sf_wandering)*u.Msun
+            M_star_draw_blue = inv_transform_sampling((phidM_blue/dM_star).value, M_star_.value, sf_blue)*u.Msun
+            M_star_draw_red = inv_transform_sampling((phidM_red/dM_star).value, M_star_.value, sf_red)*u.Msun
+            M_BH_draw_wandering = inv_transform_sampling((phidM_wandering/dM_BH).value, M_BH_.value, sf_wandering)*u.Msun
             
             # Number of sources
             ndraw_gal = len(M_star_draw_blue) + len(M_star_draw_red)
@@ -1086,19 +1071,25 @@ class DemographicModel:
         self.sed_pars = sed_pars
         
         nbootstrap = pars['nbootstrap']
-        
-        print('Setting up model SED')
-        
-        # Initialize the model SED
-        e0 = (w1*u.nm).to(u.keV, equivalencies=u.spectral())
-        e1 = (w0*u.nm).to(u.keV, equivalencies=u.spectral())
-        xspec.AllModels.setEnergies(f"{e0.value} {e1.value} 1000 log")
-        model_sed = xspec.Model(model_sed_name)
-        
-        energies = model_sed.energies(0)[::-1]*u.keV # Why N-1?
-        wav_RF = (energies[:-1]).to(u.nm, equivalencies=u.spectral())
-        
-        model_sed_riaf = {'wav':wav_RF.to(u.nm).value, 'dir':'/home/colinjb2/riaf-sed'}
+                
+        if not load_fits or save_fits:
+            
+            # Setup xspec
+            import xspec
+            # https://heasarc.gsfc.nasa.gov/xanadu/xspec/manual/node205.html#optxagnf
+            xspec.Xset.allowPrompting = False
+            
+            print('Setting up model SED')
+            # Initialize the model SED
+            e0 = (w1*u.nm).to(u.keV, equivalencies=u.spectral())
+            e1 = (w0*u.nm).to(u.keV, equivalencies=u.spectral())
+            xspec.AllModels.setEnergies(f"{e0.value} {e1.value} 1000 log")
+            model_sed = xspec.Model(model_sed_name)
+
+            energies = model_sed.energies(0)[::-1]*u.keV # Why N-1?
+            wav_RF = (energies[:-1]).to(u.nm, equivalencies=u.spectral())
+
+            model_sed_riaf = {'wav':wav_RF.to(u.nm).value, 'dir':'/home/colinjb2/riaf-sed'}
         
         # Initalize the grid
         # hard-coding some things to avoid boundary conditions in the SEDs
@@ -1243,130 +1234,136 @@ class DemographicModel:
         return
     
     
-    def sample_SF_tau(self, j, seed, t_obs, pm_prec=pm_prec, band='SDSS_g', m_5=25.0):
+    def sample_DRW(self, band='SDSS_g', m_5=25.0):
         """
         Sampe SF and tau given host galaxy luminosity (from M/L ratios) and BH mass and Eddington ratio
         
         """
-
-        ndraws = self.pars['ndraws']
-        ndraw = int(ndraws[j])
-        workdir = self.workdir
         
-        # Load samples
-        z = self.load_sample(f'z_draw', j=j)
-        M_BH = self.load_sample(f'M_BH_draw', seed, j=j)*u.Msun
-        M_star = self.load_sample(f'M_star_draw', j=j)*u.Msun
-        g_minus_r = self.load_sample(f'g-r', j=j)
-        L_band_AGN = self.load_sample(f'L_{band}', seed, j=j)*u.erg/u.s
-        L_bol_AGN = self.load_sample(f'L_draw', seed, j=j)*u.erg/u.s
-        pop = self.load_sample(f'pop', j=j)
-        
-        mask_na = L_band_AGN.value > 0
-        
-        # Initialize arrays
-        samples = {}
-
         # Use the host M/L ratio to get host galaxy luminosity
         # https://ui.adsabs.harvard.edu/abs/2009MNRAS.400.1181Z/abstract
         a = {'g': -1.030, 'r': -0.840, 'i': -0.845, 'z': -0.914}
         b = {'g': 2.053, 'r': 1.654, 'i': 1.481, 'z': 1.382}
         
-        # Convert e.g., "*_g"->"g" and "*_R"->"r"
-        band_key = band.split('_')[-1].lower()
-
-        # Distributions of colors, and aperture flux ratios
-        np.random.seed(j)
+        ndraws = self.pars['ndraws']
+        workdir = self.workdir
         
-        mask_pop = pop < 2
-        f_host = np.ones(ndraw) # Assume star cluster mass hosting wanderers are unresolved
-        f_host[mask_pop & mask_na] = f_host_model(z[mask_pop & mask_na], M_star.value[mask_pop & mask_na], seed=j)
+        nbootstrap = self.pars['nbootstrap']
         
-        # Compute host galaxy band luminosity from the M/L ratio
-        color_var = np.random.normal(0.0, 0.3, size=ndraw)
-        L_band_host = (f_host * (M_star/(1*u.Msun) /10**(b[band_key]*g_minus_r + a[band_key] + color_var))*u.Lsun).to(u.erg/u.s)
+        for k, seed in enumerate(self.pars['seed_keys']):
+            
+            print(f'Sampling DRW parameters with seeding mechanism {seed}')
+        
+            for j in tqdm(range(nbootstrap)):
                 
-        d_L = cosmo.comoving_distance(z).to(u.cm)
-        
-        # Get apparent magnitude of AGN + host galaxy
-        if band == 'GROUND_COUSINS_R':
-            # r -> R color correction
-            band_r = 'SDSS_r'
+                ndraw = int(ndraws[j])
 
-            # These are r-band fluxes from the M/L ratio
-            f_band_AGN = L_band_AGN / (4*np.pi*d_L**2) # (R)
-            f_band_host = L_band_host / (4*np.pi*d_L**2) # (r)
-            f_lambda_band_AGN = (f_band_AGN / lib[band].lpivot).to(u.erg/u.s/u.cm**2/u.AA) # (R)
-            f_lambda_band_host = (f_band_host / lib[band_r].lpivot).to(u.erg/u.s/u.cm**2/u.AA) # (r)
+                # Load samples
+                z = self.load_sample(f'z_draw', j=j)
+                M_BH = self.load_sample(f'M_BH_draw', seed, j=j)*u.Msun
+                M_star = self.load_sample(f'M_star_draw', j=j)*u.Msun
+                g_minus_r = self.load_sample(f'g-r', j=j)
+                L_band_AGN = self.load_sample(f'L_{band}', seed, j=j)*u.erg/u.s
+                L_bol_AGN = self.load_sample(f'L_draw', seed, j=j)*u.erg/u.s
+                pop = self.load_sample(f'pop', j=j)
 
-            # r-band magnitudes
-            m_band_AGN = -2.5*np.log10(f_lambda_band_AGN.value) - lib[band].AB_zero_mag # (R)
-            r_band_host = -2.5*np.log10(f_lambda_band_host.value) - lib[band_r].AB_zero_mag # (r)
+                mask_na = L_band_AGN.value > 0
 
-            # http://www.sdss3.org/dr8/algorithms/sdssUBVRITransform.php#Lupton2005
-            m_band_host = r_band_host - 0.1837*g_minus_r - 0.0971 # (R)
+                # Initialize arrays
+                samples = {}
 
-            # Magnitude addition formula AGN + host
-            #m_band = -2.5*np.log10(10**(-0.4*m_band_host) + 10**(-0.4*m_band_AGN)) # (R)
-            ## methinks AGN mag is too bright
+                # Convert e.g., "*_g"->"g" and "*_R"->"r"
+                band_key = band.split('_')[-1].lower()
 
-            # Convert back to luminosity in R
-            f_lambda_band_host = 10**(-0.4*m_band_host) * lib[band].AB_zero_flux # (R)
-            f_band_host = (f_lambda_band_host * lib[band].lpivot).to(u.erg/u.s/u.cm**2) # (R)
-            L_band_host = f_band_host * (4*np.pi*d_L**2) # (R)
-            L_band_host = L_band_host.to(u.erg/u.s)
+                # Distributions of colors, and aperture flux ratios
+                np.random.seed(j)
 
-        # Host-galaxy K-correction
-        """
-        elif band == 'SDSS_g':
-            f_band_host = L_band_host / (4*np.pi*d_L**2)
-            f_lambda_band_host = (f_band_host / lib[band].lpivot).to(u.erg/u.s/u.cm**2/u.AA)
-            # K-correction
-            #print(k_corr(z, g_minus_r))
-            m_band_host = -2.5*np.log10(f_lambda_band_host.value) - lib[band].AB_zero_mag #+ k_corr(z, g_minus_r)
-            # Convert back to luminosity
-            f_lambda_band_host = 10**(-0.4*m_band_host) * lib[band].AB_zero_flux
-            f_band_host = (f_lambda_band_host * lib[band].lpivot).to(u.erg/u.s/u.cm**2)
-            #L_band_host = f_band_host * (4*np.pi*d_L**2)
-            #L_band_host = L_band_host.to(u.erg/u.s) # (g)
-        """    
+                mask_pop = pop < 2
+                f_host = np.ones(ndraw) # Assume star cluster mass hosting wanderers are unresolved
+                f_host[mask_pop & mask_na] = f_host_model(z[mask_pop & mask_na], M_star.value[mask_pop & mask_na], seed=j)
 
-        # No color correction
-        f_band = (L_band_host + L_band_AGN) / (4*np.pi*d_L**2)
-        f_lambda_band = (f_band / lib[band].lpivot).to(u.erg/u.s/u.cm**2/u.AA)
-        m_band = -2.5*np.log10(f_lambda_band.value) - lib[band].AB_zero_mag
-        
-        samples[f'm_{band}_{seed}'] = m_band
-        
-        mask_mag = m_band < (m_5 + 1)
-        
-        # Draw SF_\infty and tau (rest-frame)
-        # In M10, M_i is basically a proxy for L_bol, so we need to use the Shen relation
-        # even for IMBHs, to preserve the linearity in the extrapolation of this relation
-        M_i_AGN = 90 - 2.5*np.log10(L_bol_AGN[mask_mag & mask_na].to(u.erg/u.s).value)
-        
-        lambda_RF = lib[band].lpivot/(1 + z[mask_mag & mask_na])
-        
-        # Host-galaxy dilution
-        SFinf = np.zeros(ndraw)
-        SFinf_AGN = draw_SFinf(lambda_RF.to(u.AA).value, M_i_AGN, M_BH[mask_mag & mask_na].value)
-        SFinf[mask_mag & mask_na] = SFinf_AGN * L_band_AGN[mask_mag & mask_na] / (L_band_AGN[mask_mag & mask_na] + L_band_host[mask_mag & mask_na])
-        
-        tau = np.zeros(ndraw)
-        tau[mask_mag & mask_na] = draw_tau(lambda_RF.to(u.AA).value, M_i_AGN, M_BH[mask_mag & mask_na].value)
-        samples[f'SFinf_{band}_{seed}'] = SFinf
-        samples[f'tau_RF_{band}_{seed}'] = tau
+                # Compute host galaxy band luminosity from the M/L ratio
+                color_var = np.random.normal(0.0, 0.3, size=ndraw)
+                L_band_host = (f_host * (M_star/(1*u.Msun) /10**(b[band_key]*g_minus_r + a[band_key] + color_var))*u.Lsun).to(u.erg/u.s)
 
-        # Light curves
-        #mask_small = (SFinf < SFinf_small) | (M_BH < 1e2*u.Msun) | (m_band > (m_5 + 1))
-        
-        # Save the results to free up memory
-        self.save_samples(samples, j)
+                d_L = cosmo.comoving_distance(z).to(u.cm)
+
+                # Get apparent magnitude of AGN + host galaxy
+                if band == 'GROUND_COUSINS_R':
+                    # r -> R color correction
+                    band_r = 'SDSS_r'
+
+                    # These are r-band fluxes from the M/L ratio
+                    f_band_AGN = L_band_AGN / (4*np.pi*d_L**2) # (R)
+                    f_band_host = L_band_host / (4*np.pi*d_L**2) # (r)
+                    f_lambda_band_AGN = (f_band_AGN / lib[band].lpivot).to(u.erg/u.s/u.cm**2/u.AA) # (R)
+                    f_lambda_band_host = (f_band_host / lib[band_r].lpivot).to(u.erg/u.s/u.cm**2/u.AA) # (r)
+
+                    # r-band magnitudes
+                    m_band_AGN = -2.5*np.log10(f_lambda_band_AGN.value) - lib[band].AB_zero_mag # (R)
+                    r_band_host = -2.5*np.log10(f_lambda_band_host.value) - lib[band_r].AB_zero_mag # (r)
+
+                    # http://www.sdss3.org/dr8/algorithms/sdssUBVRITransform.php#Lupton2005
+                    m_band_host = r_band_host - 0.1837*g_minus_r - 0.0971 # (R)
+
+                    # Magnitude addition formula AGN + host
+                    #m_band = -2.5*np.log10(10**(-0.4*m_band_host) + 10**(-0.4*m_band_AGN)) # (R)
+                    ## methinks AGN mag is too bright
+
+                    # Convert back to luminosity in R
+                    f_lambda_band_host = 10**(-0.4*m_band_host) * lib[band].AB_zero_flux # (R)
+                    f_band_host = (f_lambda_band_host * lib[band].lpivot).to(u.erg/u.s/u.cm**2) # (R)
+                    L_band_host = f_band_host * (4*np.pi*d_L**2) # (R)
+                    L_band_host = L_band_host.to(u.erg/u.s)
+
+                # Host-galaxy K-correction
+                """
+                elif band == 'SDSS_g':
+                    f_band_host = L_band_host / (4*np.pi*d_L**2)
+                    f_lambda_band_host = (f_band_host / lib[band].lpivot).to(u.erg/u.s/u.cm**2/u.AA)
+                    # K-correction
+                    #print(k_corr(z, g_minus_r))
+                    m_band_host = -2.5*np.log10(f_lambda_band_host.value) - lib[band].AB_zero_mag #+ k_corr(z, g_minus_r)
+                    # Convert back to luminosity
+                    f_lambda_band_host = 10**(-0.4*m_band_host) * lib[band].AB_zero_flux
+                    f_band_host = (f_lambda_band_host * lib[band].lpivot).to(u.erg/u.s/u.cm**2)
+                    #L_band_host = f_band_host * (4*np.pi*d_L**2)
+                    #L_band_host = L_band_host.to(u.erg/u.s) # (g)
+                """    
+
+                # No color correction
+                f_band = (L_band_host + L_band_AGN) / (4*np.pi*d_L**2)
+                f_lambda_band = (f_band / lib[band].lpivot).to(u.erg/u.s/u.cm**2/u.AA)
+                m_band = -2.5*np.log10(f_lambda_band.value) - lib[band].AB_zero_mag
+
+                samples[f'm_{band}_{seed}'] = m_band
+
+                mask_mag = m_band < (m_5 + 1)
+
+                # Draw SF_\infty and tau (rest-frame)
+                # In M10, M_i is basically a proxy for L_bol, so we need to use the Shen relation
+                # even for IMBHs, to preserve the linearity in the extrapolation of this relation
+                M_i_AGN = 90 - 2.5*np.log10(L_bol_AGN[mask_mag & mask_na].to(u.erg/u.s).value)
+
+                lambda_RF = lib[band].lpivot/(1 + z[mask_mag & mask_na])
+
+                # Host-galaxy dilution
+                SFinf = np.zeros(ndraw)
+                SFinf_AGN = draw_SFinf(lambda_RF.to(u.AA).value, M_i_AGN, M_BH[mask_mag & mask_na].value)
+                SFinf[mask_mag & mask_na] = SFinf_AGN * L_band_AGN[mask_mag & mask_na] / (L_band_AGN[mask_mag & mask_na] + L_band_host[mask_mag & mask_na])
+
+                tau = np.zeros(ndraw)
+                tau[mask_mag & mask_na] = draw_tau(lambda_RF.to(u.AA).value, M_i_AGN, M_BH[mask_mag & mask_na].value)
+                samples[f'SFinf_{band}_{seed}'] = SFinf
+                samples[f'tau_RF_{band}_{seed}'] = tau
+
+                # Save the results to free up memory
+                self.save_samples(samples, j)
 
         return
     
     
-    def sample_light_curve(self, j, seed, t_obs, save_lc=True, pm_prec=pm_prec, band='SDSS_g', m_5=25.0):
+    def sample_light_curves(self, t_obs, save_lc=True, pm_prec=pm_prec, band='SDSS_g', m_5=25.0, n_chunks=10):
         """
         Sampe light curves given DRW parameters
         
@@ -1377,82 +1374,74 @@ class DemographicModel:
         """
         
         ndraws = self.pars['ndraws']
-        ndraw = int(ndraws[j])
         workdir = self.workdir
         
-        # Load samples
-        m_band = self.load_sample(f'm_{band}', seed, j=j)
+        nbootstrap = self.pars['nbootstrap']
         
-        # Mask here to save memory
-        mask_mag = (m_band < (m_5 + 1))
+        self.pars['lc_t_obs'] = t_obs
         
-        SFinf_mag = self.load_sample(f'SFinf_{band}', seed, j=j)[mask_mag]
-        tau_mag = self.load_sample(f'tau_RF_{band}', seed, j=j)[mask_mag]
-        z_mag = self.load_sample(f'z_draw', j=j)[mask_mag]
-                
-        print('sim lc')
-        
-        # Simulate light curves
-        tau_obs_mag = tau_mag * (1 + z_mag)
-        lc_mag = simulate_drw(t_obs, tau_obs_mag, m_band[mask_mag], SFinf_mag).T
-                
-        print('add noise')
-        
-        # Add noise to light curves
-        lc_mag_err = pm_prec(lc_mag)
-        lc_mag_obs = np.clip(np.random.normal(lc_mag, lc_mag_err), 0, 30)
-        
-        print('calc sig')
-        
-        # Save light curve data
-        samples = {}
-        if save_lc:
-            # Add to samples
-            samples[f'lc_mag_{band}_{seed}'] = mag_obs
-            samples[f'lc_magerr_{band}_{seed}'] = mag_err
-        
-        # Calculate variability significance
-        samples[f'std_{seed}'] = np.zeros(nbootstrap)
-        samples[f'sigvar_{seed}'] = np.zeros(nbootstrap)
-        samples[f'std_{seed}'][mask_mag] = np.std(lc_mag_obs, axis=1)
-        samples[f'sigvar_{seed}'][mask_mag] = calcsigvar(lc_mag_obs, lc_mag_err)
-
-        # Save the results to free up memory
-        self.save_samples(samples, j)
-        return
-    
-    
-    def sample_light_curves(self, t_obs, pm_prec=pm_prec, save_lc=True, band='SDSS_g', m_5=25.0):
-        
-        pars = self.pars
-        nbootstrap = pars['nbootstrap']
-        
-        n_jobs = 4
-        
-        pars['lc_t_obs'] = t_obs
-                        
-        for k, seed in enumerate(pars['seed_keys']):
+        for k, seed in enumerate(self.pars['seed_keys']):
             
-            print(f'Sampling light curves with seeding mechanism {seed}')
-                        
-            """
-            with WorkerPool(n_jobs=n_jobs) as pool:
-                args = zip(j, seed, t_obs, pm_prec=pm_prec, band=band, SFinf_small=SFinf_small, m_5=m_5)
-                pool.imap(self.sample_SF_tau, args, progress_bar=True)
-                
-                args = zip(j, seed, SFinf, tau, z, m_band, mask, t_obs, pm_prec=pm_prec, save_lc=save_lc,
-                                        band=band, SFinf_small=SFinf_small, m_5=m_5)
-                pool.imap(self.sample_light_curve, args, progress_bar=True)
-            """
-            
-            #"""
+            print(f'Sampling DRW parameters with seeding mechanism {seed}')
+        
             for j in tqdm(range(nbootstrap)):
                 
-                self.sample_SF_tau(j, seed, t_obs, pm_prec=pm_prec, band=band, m_5=m_5)
-                                                
-                self.sample_light_curve(j, seed, t_obs, pm_prec=pm_prec, save_lc=save_lc,
-                                        band=band, m_5=m_5)
-            #"""                     
+                ndraw = int(ndraws[j])
+        
+                # Load samples
+                m_band = self.load_sample(f'm_{band}', seed, j=j)
+
+                # Mask here to save memory
+                mask_mag = (m_band < (m_5 + 1))
+
+                SFinf_mag = self.load_sample(f'SFinf_{band}', seed, j=j)[mask_mag]
+                tau_mag = self.load_sample(f'tau_RF_{band}', seed, j=j)[mask_mag]
+                z_mag = self.load_sample(f'z_draw', j=j)[mask_mag]
+                
+                print('sim lc')
+
+                tau_obs_mag = tau_mag * (1 + z_mag)
+
+                # Split into chunks to conserve memory
+                n = len(tau_mag)//n_chunks
+                lc_mag_obs = []
+                lc_mag_err = []
+                for i in range(0, len(tau_mag), n):
+                    
+                    print(i)
+                    
+                    # Simulate light curves
+                    lc_mag_i = simulate_drw(t_obs, tau_obs_mag[i:i+n], m_band[mask_mag][i:i+n], SFinf_mag[i:i+n]).T
+                    
+                    # Add noise to light curves
+                    lc_mag_err_i = pm_prec(lc_mag_i)
+                    lc_mag_obs_i = np.clip(np.random.normal(lc_mag_i, lc_mag_err_i), 0, 30)
+                    
+                    lc_mag_obs.append(lc_mag_obs_i)
+                    lc_mag_err.append(lc_mag_err_i)
+                    
+                lc_mag_obs = np.concatenate(lc_mag_obs)
+                lc_mag_err = np.concatenate(lc_mag_err)
+            
+
+                print('calc sig')
+
+                # Save light curve data
+                samples = {}
+                if save_lc:
+                    # Add to samples
+                    samples[f'lc_mag_{band}_{seed}'] = lc_mag_obs
+                    samples[f'lc_magerr_{band}_{seed}'] = lc_mag_err
+
+                # Calculate variability significance
+                samples[f'std_{seed}'] = np.zeros(ndraw)
+                samples[f'sigvar_{seed}'] = np.zeros(ndraw)
+                samples[f'std_{seed}'][mask_mag] = np.std(lc_mag_obs, axis=1)
+                samples[f'sigvar_{seed}'][mask_mag] = calcsigvar(lc_mag_obs, lc_mag_err)
+
+                # Save the results to free up memory
+                self.save_samples(samples, j)
+                
         return
     
     
