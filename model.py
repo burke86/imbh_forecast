@@ -19,6 +19,7 @@ from fast_histogram import histogram1d
 
 import jax
 import jax.numpy as jnp
+from jax import jit
 
 import matplotlib.pyplot as plt
 from tqdm.notebook import tqdm
@@ -582,20 +583,9 @@ def lambda_obs(L_bol, seed=None, randomize=True):
         return lambda_obs
 
 
-@njit
-def drw(t_obs, x, tau, SFinf, E, N):
-    """
-    Generate damped random walk on grid t_obs
-    """
-    dt = np.diff(t_obs)
-    for i in range(1, N):
-        x[i] = (x[i - 1] * np.exp(-dt[i - 1] / tau) + SFinf * np.sqrt(1 - np.exp(-2 * dt[i - 1] / tau)) * E[i])
-    return x
-
-
 def simulate_drw(t_obs, tau=300, xmean=0, SFinf=0.3):
     """
-    Simulate damped random walk on grid given tau, SF
+    Simulate damped random walk on at times t_obs given tau, SF
     """
     N = len(t_obs)
     ndraw = len(tau)
@@ -606,8 +596,13 @@ def simulate_drw(t_obs, tau=300, xmean=0, SFinf=0.3):
     E = np.random.normal(0, 1, (N, ndraw))
     x[0,:] = E[0,:] * SFinf
     
-    lc = drw(t_obs, x, tau, SFinf, E, N) + xmean
-    return lc
+    dt = np.diff(t_obs)    
+    # N should be small
+    for i in range(1, N):
+        s = np.sqrt(dt[i - 1] / tau)
+        x[i] = x[i - 1] * np.exp(-s) + SFinf * np.sqrt(1 - np.exp(-2 * s)) * E[i]
+    
+    return x + xmean
 
 
 def draw_SFinf(lambda_RF, M_i, M_BH, randomize=True):
@@ -656,7 +651,7 @@ def draw_tau(lambda_RF, M_i, M_BH, randomize=True):
                    D*np.log10(M_BH/1e8)) # days
     return tau
 
-
+#@jit
 def inv_transform_sampling(y, x, n_samples=1000):
     """
     Perform inverse transform sampling on curve y(x)
@@ -667,7 +662,7 @@ def inv_transform_sampling(y, x, n_samples=1000):
     cum_values = np.zeros(x.shape)
     cum_values[1:] = np.cumsum(y*dx)/np.sum(y*dx)
     r = np.random.rand(int(n_samples))
-    return np.interp(r, cum_values, x)
+    return jnp.interp(r, cum_values, x)
 
 
 def survival_sampling(y, survival, fill_value=np.nan):
@@ -710,10 +705,11 @@ class DemographicModel:
     """
     Class containing methods to run model
     """
-    def __init__(self, survey='lsst', workdir='work', load=False):
+    def __init__(self, survey='lsst', workdir='work', load=False, overwrite=True):
         # argument for input of multiple occupation fractions
         self.pars = {}
         self.workdir = workdir
+        self.overwrite = overwrite
         
         if load:
             with open(os.path.join(workdir, f'pars_{survey}.pkl'), 'rb') as f:
@@ -744,6 +740,12 @@ class DemographicModel:
             datasetname = f'samples_{key}_{j}.h5'
             filename = os.path.join(self.workdir, datasetname)
             # Write file
+            if os.path.isfile(filename):
+                if self.overwrite:
+                    print('File exists, and self.overwrite=True, so overwriting existing file.')
+                else:
+                    print('File exists, and overwrite=False.')
+                    return 
             with h5py.File(filename, 'w') as hf:
                 hf.create_dataset(datasetname,  data=s)
         return
@@ -1363,7 +1365,7 @@ class DemographicModel:
         return
     
     
-    def sample_light_curves(self, t_obs, save_lc=True, pm_prec=pm_prec, band='SDSS_g', m_5=25.0, n_chunks=10):
+    def sample_light_curves(self, t_obs, save_lc=True, pm_prec=pm_prec, band='SDSS_g', m_5=25.0):
         """
         Sampe light curves given DRW parameters
         
@@ -1375,6 +1377,9 @@ class DemographicModel:
         
         ndraws = self.pars['ndraws']
         workdir = self.workdir
+        
+        cadence = int(np.mean(np.diff(t_obs)))
+        self.cadence = cadence
         
         nbootstrap = self.pars['nbootstrap']
         
@@ -1401,43 +1406,29 @@ class DemographicModel:
                 print('sim lc')
 
                 tau_obs_mag = tau_mag * (1 + z_mag)
-
-                # Split into chunks to conserve memory
-                n = len(tau_mag)//n_chunks
-                lc_mag_obs = []
-                lc_mag_err = []
-                for i in range(0, len(tau_mag), n):
-                    
-                    print(i)
-                    
-                    # Simulate light curves
-                    lc_mag_i = simulate_drw(t_obs, tau_obs_mag[i:i+n], m_band[mask_mag][i:i+n], SFinf_mag[i:i+n]).T
-                    
-                    # Add noise to light curves
-                    lc_mag_err_i = pm_prec(lc_mag_i)
-                    lc_mag_obs_i = np.clip(np.random.normal(lc_mag_i, lc_mag_err_i), 0, 30)
-                    
-                    lc_mag_obs.append(lc_mag_obs_i)
-                    lc_mag_err.append(lc_mag_err_i)
-                    
-                lc_mag_obs = np.concatenate(lc_mag_obs)
-                lc_mag_err = np.concatenate(lc_mag_err)
-            
+                
+                # Simulate light curves
+                lc_mag = simulate_drw(t_obs, tau_obs_mag, m_band[mask_mag], SFinf_mag).T
+                # Add noise to light curves
+                lc_mag_err = pm_prec(lc_mag)
+                lc_mag_obs = np.clip(np.random.normal(lc_mag, lc_mag_err), 0, 30)
 
                 print('calc sig')
 
                 # Save light curve data
                 samples = {}
-                if save_lc:
-                    # Add to samples
-                    samples[f'lc_mag_{band}_{seed}'] = lc_mag_obs
-                    samples[f'lc_magerr_{band}_{seed}'] = lc_mag_err
 
                 # Calculate variability significance
-                samples[f'std_{seed}'] = np.zeros(ndraw)
-                samples[f'sigvar_{seed}'] = np.zeros(ndraw)
-                samples[f'std_{seed}'][mask_mag] = np.std(lc_mag_obs, axis=1)
-                samples[f'sigvar_{seed}'][mask_mag] = calcsigvar(lc_mag_obs, lc_mag_err)
+                samples[f'std_{cadence}_{seed}'] = np.zeros(ndraw)
+                samples[f'sigvar_{cadence}_{seed}'] = np.zeros(ndraw)
+                samples[f'std_{cadence}_{seed}'][mask_mag] = np.std(lc_mag_obs, axis=1)
+                samples[f'sigvar_{cadence}_{seed}'][mask_mag] = calcsigvar(lc_mag_obs, lc_mag_err)
+                
+                # Save the candidate variable light curves
+                if save_lc:
+                    # Add to samples
+                    samples[f'lc_mag_{band}_{cadence}_{seed}'] = lc_mag_obs
+                    samples[f'lc_magerr_{band}_{cadence}_{seed}'] = lc_mag_err
 
                 # Save the results to free up memory
                 self.save_samples(samples, j)
