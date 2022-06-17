@@ -1108,7 +1108,7 @@ class DemographicModel:
             
                 data0 = hdul[0].data
                 nuf_nu = (10**data0) * u.erg/u.s/u.cm**2
-
+                print(nuf_nu)
                 M_i_model = hdul[1].data
 
                 shape = np.shape(nuf_nu)
@@ -1134,7 +1134,7 @@ class DemographicModel:
 
                 f_band = f_lambda_band * bandpass.lpivot
                 L_band_model = (f_band * 4*np.pi*d_L**2).value
-                        
+                print(f_band)
         else:
             
             print('Generating AGN SEDs')
@@ -1282,12 +1282,14 @@ class DemographicModel:
 
                 mask_pop = pop < 2
                 f_host = np.ones(ndraw) # Assume star cluster mass hosting wanderers are unresolved
-                f_host[mask_pop & mask_na] = f_host_model(z[mask_pop & mask_na], M_star.value[mask_pop & mask_na], seed=j)
+                f_host[mask_pop] = f_host_model(z[mask_pop], M_star.value[mask_pop], seed=j)
+                
+                print(f_host[mask_pop])
 
                 # Compute host galaxy band luminosity from the M/L ratio
                 color_var = np.random.normal(0.0, 0.3, size=ndraw)
                 L_band_host = (f_host * (M_star/(1*u.Msun) /10**(b[band_key]*g_minus_r + a[band_key] + color_var))*u.Lsun).to(u.erg/u.s)
-
+                print(L_band_host)
                 d_L = cosmo.comoving_distance(z).to(u.cm)
 
                 # Get apparent magnitude of AGN + host galaxy
@@ -1354,7 +1356,7 @@ class DemographicModel:
                 SFinf_AGN = draw_SFinf(lambda_RF.to(u.AA).value, M_i_AGN, M_BH[mask_mag & mask_na].value)
                 SFinf[mask_mag & mask_na] = SFinf_AGN * L_band_AGN[mask_mag & mask_na] / (L_band_AGN[mask_mag & mask_na] + L_band_host[mask_mag & mask_na])
 
-                tau = np.zeros(ndraw)
+                tau = np.full(ndraw, np.nan)
                 tau[mask_mag & mask_na] = draw_tau(lambda_RF.to(u.AA).value, M_i_AGN, M_BH[mask_mag & mask_na].value)
                 samples[f'SFinf_{band}_{seed}'] = SFinf
                 samples[f'tau_RF_{band}_{seed}'] = tau
