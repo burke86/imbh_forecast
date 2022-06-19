@@ -1134,7 +1134,7 @@ class DemographicModel:
 
                 f_band = f_lambda_band * bandpass.lpivot
                 L_band_model = (f_band * 4*np.pi*d_L**2).value
-                print(f_band)
+                
         else:
             
             print('Generating AGN SEDs')
@@ -1284,41 +1284,23 @@ class DemographicModel:
                 f_host = np.ones(ndraw) # Assume star cluster mass hosting wanderers are unresolved
                 f_host[mask_pop] = f_host_model(z[mask_pop], M_star.value[mask_pop], seed=j)
                 
-                print(f_host[mask_pop])
-
                 # Compute host galaxy band luminosity from the M/L ratio
                 color_var = np.random.normal(0.0, 0.3, size=ndraw)
                 L_band_host = (f_host * (M_star/(1*u.Msun) /10**(b[band_key]*g_minus_r + a[band_key] + color_var))*u.Lsun).to(u.erg/u.s)
-                print(L_band_host)
-                d_L = cosmo.comoving_distance(z).to(u.cm)
+                
+                d_L = cosmo.comoving_distance(z) #.to(u.cm)
 
                 # Get apparent magnitude of AGN + host galaxy
                 if band == 'GROUND_COUSINS_R':
                     # r -> R color correction
                     band_r = 'SDSS_r'
-
-                    # These are r-band fluxes from the M/L ratio
-                    f_band_AGN = L_band_AGN / (4*np.pi*d_L**2) # (R)
-                    f_band_host = L_band_host / (4*np.pi*d_L**2) # (r)
-                    f_lambda_band_AGN = (f_band_AGN / lib[band].lpivot).to(u.erg/u.s/u.cm**2/u.AA) # (R)
-                    f_lambda_band_host = (f_band_host / lib[band_r].lpivot).to(u.erg/u.s/u.cm**2/u.AA) # (r)
-
-                    # r-band magnitudes
-                    m_band_AGN = -2.5*np.log10(f_lambda_band_AGN.value) - lib[band].AB_zero_mag # (R)
-                    r_band_host = -2.5*np.log10(f_lambda_band_host.value) - lib[band_r].AB_zero_mag # (r)
-
-                    # http://www.sdss3.org/dr8/algorithms/sdssUBVRITransform.php#Lupton2005
-                    m_band_host = r_band_host - 0.1837*g_minus_r - 0.0971 # (R)
-
-                    # Magnitude addition formula AGN + host
-                    #m_band = -2.5*np.log10(10**(-0.4*m_band_host) + 10**(-0.4*m_band_AGN)) # (R)
-                    ## methinks AGN mag is too bright
-
-                    # Convert back to luminosity in R
-                    f_lambda_band_host = 10**(-0.4*m_band_host) * lib[band].AB_zero_flux # (R)
-                    f_band_host = (f_lambda_band_host * lib[band].lpivot).to(u.erg/u.s/u.cm**2) # (R)
-                    L_band_host = f_band_host * (4*np.pi*d_L**2) # (R)
-                    L_band_host = L_band_host.to(u.erg/u.s)
+                    
+                    ######## r -> R
+                    alpha = -0.1837
+                    beta = -0.0971
+                    _L_band_host = 10**(-0.4*(-2.5*np.log10(L_band_host.value) + alpha*g_minus_r + beta)) * u.erg/u.s
+                    print('LBAND HOST COMP=',_L_band_host)
+                    #######
 
                 # Host-galaxy K-correction
                 """
@@ -1339,7 +1321,7 @@ class DemographicModel:
                 f_band = (L_band_host + L_band_AGN) / (4*np.pi*d_L**2)
                 f_lambda_band = (f_band / lib[band].lpivot).to(u.erg/u.s/u.cm**2/u.AA)
                 m_band = -2.5*np.log10(f_lambda_band.value) - lib[band].AB_zero_mag
-
+                
                 samples[f'm_{band}_{seed}'] = m_band
 
                 mask_mag = m_band < (m_5 + 1)
